@@ -31,13 +31,9 @@ RAG 目前聚焦两个核心工作流：
 | 对比项 | 原始 PageIndex | 当前 RAG |
 | --- | --- | --- |
 | 对外项目定位 | 以“Vectorless, Reasoning-based RAG”为核心叙事，强调树检索、Chat Platform、MCP、API 与官方生态 | 以本地可运行的结构化 RAG 工具包为核心，强调建树、混合索引、本地查询与可选 LLM 重排序 |
-| 对外品牌与包名 | `PageIndex`，主包为 `pageindex`，CLI 入口为 `run_pageindex.py` | `RAG`，主包为 `rag`，CLI 入口为 `run_rag.py` |
-| README 重点 | 官方产品介绍、平台入口、教程、Cookbook、案例和品牌说明 | 本地安装、环境变量、运行命令、索引构建、query-only 查询流程与测试说明 |
 | 开源 CLI 主路径 | 主要展示“从 PDF / Markdown 生成树结构” | 同时支持“生成树 + 构建索引 + 连续查询 + 可选 rerank” |
 | 查询执行层 | README 中主要强调基于树结构和 LLM 的 reasoning/tree search 思路 | 增加本地混合检索层：倒排索引、Roaring Bitmap postings、哈希直达和页码过滤 |
 | 连续查询能力 | 默认工作流更偏向先生成树，再由外部流程做检索 | 支持先建一次索引，再通过 `--index-path` 直接连续查询，不必重复解析 PDF |
-| 项目附带内容 | 含较多品牌化资源，如 Cookbooks、Tutorials、平台入口和案例链接 | 聚焦仓库自身代码、测试、架构文档和可执行命令，减少上游产品化内容暴露 |
-| 上游关系说明 | 作为原始项目本体呈现 | 明确标注“基于 PageIndex 的下游重构项目”，保留来源与许可证说明 |
 
 ## 关键能力
 
