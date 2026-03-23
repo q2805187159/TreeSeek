@@ -76,6 +76,14 @@ API_URL=your_base_url
 
 运行时也兼容 OpenAI 风格的环境变量命名，例如 `OPENAI_API_KEY`、`OPENAI_API_BASE` 和 `OPENAI_BASE_URL`。
 
+如果你使用的是 OpenAI-compatible 服务并传入的是服务端原生模型 ID，例如：
+
+```bash
+MODEL=Pro/deepseek-ai/DeepSeek-V3.2
+```
+
+程序会在底层自动兼容 `litellm` 所需的 provider 前缀，不需要你手动改成 `openai/...`。
+
 ## 快速开始
 
 ### 构建 PDF 树
@@ -113,6 +121,26 @@ python run_rag.py \
   --rerank-top-k 3
 ```
 
+### 建一次索引，后续直接查询
+
+第一次先建树并构建索引：
+
+```bash
+python run_rag.py \
+  --pdf_path /path/to/document.pdf \
+  --build-query-index yes \
+  --include-text yes
+```
+
+后续直接加载已有索引查询，不再重新解析 PDF：
+
+```bash
+python run_rag.py \
+  --index-path results/document_query_index.pkl.gz \
+  --query "retrieval design" \
+  --top-k 5
+```
+
 ### 运行本地索引 benchmark
 
 ```bash
@@ -148,6 +176,8 @@ from rag import (
 
 - 树结构 JSON：`results/<name>_structure.json`
 - 查询索引：`results/<name>_query_index.pkl.gz`
+
+如果你已经有查询索引，也可以通过 `--index-path` 进入 query-only 模式，直接查询而不重新解析源文档。
 
 查询结果会以 JSON 格式输出，并包含：
 

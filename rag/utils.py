@@ -16,6 +16,29 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
+KNOWN_PROVIDER_PREFIXES = {
+    "openai",
+    "azure",
+    "anthropic",
+    "xai",
+    "vertex_ai",
+    "nvidia_nim",
+    "huggingface",
+    "ollama",
+    "openrouter",
+    "novita",
+    "vercel_ai_gateway",
+    "bedrock",
+    "groq",
+    "cohere",
+    "mistral",
+    "deepseek",
+    "fireworks_ai",
+    "replicate",
+    "together_ai",
+    "togethercomputer",
+}
+
 def _get_env_value(key):
     value = os.getenv(key)
     if value is None:
@@ -38,6 +61,31 @@ _copy_env_if_missing("OPENAI_BASE_URL", "API_URL")
 _LITELLM = None
 
 
+def normalize_model_name(model):
+    if model is None:
+        return None
+
+    model = str(model).strip()
+    if not model:
+        return None
+
+    provider_hint = model.split("/", 1)[0].lower()
+    has_known_provider = provider_hint in KNOWN_PROVIDER_PREFIXES
+    has_openai_compatible_base = bool(
+        _get_env_value("OPENAI_API_BASE")
+        or _get_env_value("OPENAI_BASE_URL")
+        or _get_env_value("API_URL")
+    )
+
+    if has_known_provider or not has_openai_compatible_base:
+        return model
+
+    # When users point LiteLLM at an OpenAI-compatible endpoint such as SiliconFlow,
+    # allow plain provider-side model ids like "Qwen/..." or "Pro/..." by
+    # normalizing them to the openai provider namespace expected by LiteLLM.
+    return f"openai/{model}"
+
+
 def _get_litellm():
     global _LITELLM
     if _LITELLM is None:
@@ -49,17 +97,18 @@ def count_tokens(text, model=None):
     if not text:
         return 0
     litellm = _get_litellm()
-    return litellm.token_counter(model=model, text=text)
+    return litellm.token_counter(model=normalize_model_name(model), text=text)
 
 
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     litellm = _get_litellm()
+    normalized_model = normalize_model_name(model)
     for i in range(max_retries):
         try:
             response = litellm.completion(
-                model=model,
+                model=normalized_model,
                 messages=messages,
                 temperature=0,
             )
@@ -85,10 +134,11 @@ async def llm_acompletion(model, prompt):
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
     litellm = _get_litellm()
+    normalized_model = normalize_model_name(model)
     for i in range(max_retries):
         try:
             response = await litellm.acompletion(
-                model=model,
+                model=normalized_model,
                 messages=messages,
                 temperature=0,
             )

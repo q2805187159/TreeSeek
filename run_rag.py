@@ -91,11 +91,43 @@ def build_bonuses(opt):
         "all_terms_hit": opt.bonus_all_terms_hit,
     }
 
+
+def emit_query_results(doc_name, query, index_path, results):
+    print(json.dumps({
+        "doc_name": doc_name,
+        "query": query,
+        "index_path": index_path,
+        "results": [item.to_dict() for item in results],
+    }, indent=2, ensure_ascii=False))
+
+
+def execute_query(index, args, opt, index_path):
+    top_k = args.top_k or opt.query_default_top_k
+    leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
+    results = search_index(
+        index,
+        args.query,
+        top_k=top_k,
+        expand_ancestors=opt.query_expand_ancestors,
+        leaf_only=leaf_only,
+    )
+    if is_yes(args.rerank_with_llm):
+        results = rerank_query_results(
+            index,
+            args.query,
+            results,
+            model=opt.model,
+            top_k=args.rerank_top_k,
+        )
+    emit_query_results(index.doc_id, args.query, index_path, results)
+
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Process PDF or Markdown document and generate structure')
     parser.add_argument('--pdf_path', type=str, help='Path to the PDF file')
     parser.add_argument('--md_path', type=str, help='Path to the Markdown file')
+    parser.add_argument('--index-path', type=str, default=None,
+                      help='Path to an existing query index for query-only mode')
 
     parser.add_argument('--model', type=str, default=None, help='Model to use (overrides config.yaml)')
 
@@ -140,11 +172,41 @@ if __name__ == "__main__":
                       help='Token threshold for generating summaries (markdown only)')
     args = parser.parse_args()
     
-    # Validate that exactly one file type is specified
-    if not args.pdf_path and not args.md_path:
-        raise ValueError("Either --pdf_path or --md_path must be specified")
     if args.pdf_path and args.md_path:
         raise ValueError("Only one of --pdf_path or --md_path can be specified")
+
+    if not args.pdf_path and not args.md_path and not args.index_path:
+        raise ValueError("Either --pdf_path, --md_path, or --index-path must be specified")
+
+    if args.index_path and not os.path.isfile(args.index_path):
+        raise ValueError(f"Query index file not found: {args.index_path}")
+
+    if args.index_path and not args.pdf_path and not args.md_path:
+        if not args.query:
+            raise ValueError("--query must be specified when using --index-path")
+
+        user_opt = {
+            'model': args.model,
+            'query_default_top_k': args.top_k,
+            'query_expand_ancestors': None,
+            'query_leaf_only': args.leaf_only,
+            'index_include_text': args.include_text,
+            'index_backend': 'inverted',
+            'index_postings_backend': None,
+            'weight_title': None,
+            'weight_path': None,
+            'weight_summary': None,
+            'weight_prefix_summary': None,
+            'weight_text': None,
+            'bonus_exact_title': None,
+            'bonus_phrase': None,
+            'bonus_leaf': None,
+            'bonus_all_terms_hit': None,
+        }
+        opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
+        query_index = load_query_index(args.index_path)
+        execute_query(query_index, args, opt, args.index_path)
+        raise SystemExit(0)
     
     if args.pdf_path:
         # Validate PDF file
@@ -222,29 +284,12 @@ if __name__ == "__main__":
             print(f'Query index saved to: {query_index_path}')
 
         if args.query and query_index is not None:
-            top_k = args.top_k or opt.query_default_top_k
-            leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
-            results = search_index(
+            execute_query(
                 query_index,
-                args.query,
-                top_k=top_k,
-                expand_ancestors=opt.query_expand_ancestors,
-                leaf_only=leaf_only,
+                args,
+                opt,
+                query_index_path if os.path.isfile(query_index_path) else None,
             )
-            if is_yes(args.rerank_with_llm):
-                results = rerank_query_results(
-                    query_index,
-                    args.query,
-                    results,
-                    model=opt.model,
-                    top_k=args.rerank_top_k,
-                )
-            print(json.dumps({
-                "doc_name": result["doc_name"],
-                "query": args.query,
-                "index_path": query_index_path if os.path.isfile(query_index_path) else None,
-                "results": [item.to_dict() for item in results],
-            }, indent=2, ensure_ascii=False))
             
     elif args.md_path:
         # Validate Markdown file
@@ -341,26 +386,9 @@ if __name__ == "__main__":
             print(f'Query index saved to: {query_index_path}')
 
         if args.query and query_index is not None:
-            top_k = args.top_k or opt.query_default_top_k
-            leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
-            results = search_index(
+            execute_query(
                 query_index,
-                args.query,
-                top_k=top_k,
-                expand_ancestors=opt.query_expand_ancestors,
-                leaf_only=leaf_only,
+                args,
+                opt,
+                query_index_path if os.path.isfile(query_index_path) else None,
             )
-            if is_yes(args.rerank_with_llm):
-                results = rerank_query_results(
-                    query_index,
-                    args.query,
-                    results,
-                    model=opt.model,
-                    top_k=args.rerank_top_k,
-                )
-            print(json.dumps({
-                "doc_name": result["doc_name"],
-                "query": args.query,
-                "index_path": query_index_path if os.path.isfile(query_index_path) else None,
-                "results": [item.to_dict() for item in results],
-            }, indent=2, ensure_ascii=False))

@@ -6,5 +6,6 @@ __pycache__/
 .tmp_pytest/
 pytest-cache-files-*/
 /results/
+/logs/
 .idea/
 .claude/
