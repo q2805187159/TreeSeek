@@ -1,0 +1,17 @@
+[
+  {
+    "doc": "2023-annual-report_structure.json",
+    "query": "financial stability",
+    "expected_node_ids": ["0006", "0007", "0008"]
+  },
+  {
+    "doc": "q1-fy25-earnings_structure.json",
+    "query": "Disney+ subscribers",
+    "expected_node_ids": ["0003", "0014", "0001"]
+  },
+  {
+    "doc": "PRML_structure.json",
+    "query": "Bayesian probabilities",
+    "expected_node_ids": ["0009", "0006"]
+  }
+]
