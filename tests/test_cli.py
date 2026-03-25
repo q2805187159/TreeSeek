@@ -25,7 +25,7 @@ def test_markdown_cli_builds_query_index_and_runs_query(local_tmp_path):
 
     command = [
         sys.executable,
-        str(repo_root / "run_rag.py"),
+        str(repo_root / "run_treeseek.py"),
         "--md_path",
         str(md_path),
         "--if-add-node-summary",
@@ -55,6 +55,9 @@ def test_markdown_cli_builds_query_index_and_runs_query(local_tmp_path):
     assert (index_dir / "sample_query_index.pkl.gz").exists()
     assert '"query": "direct-to-consumer"' in completed.stdout
     assert "Direct-to-Consumer" in completed.stdout
+    assert '"snippet"' in completed.stdout
+    assert '"snippet_field"' in completed.stdout
+    assert '"field_scores"' not in completed.stdout
 
 
 def test_query_only_mode_uses_existing_index_without_source_document(local_tmp_path):
@@ -73,7 +76,7 @@ def test_query_only_mode_uses_existing_index_without_source_document(local_tmp_p
 
     build_command = [
         sys.executable,
-        str(repo_root / "run_rag.py"),
+        str(repo_root / "run_treeseek.py"),
         "--md_path",
         str(md_path),
         "--if-add-node-summary",
@@ -98,7 +101,7 @@ def test_query_only_mode_uses_existing_index_without_source_document(local_tmp_p
 
     query_command = [
         sys.executable,
-        str(repo_root / "run_rag.py"),
+        str(repo_root / "run_treeseek.py"),
         "--index-path",
         str(index_path),
         "--query",
@@ -118,3 +121,68 @@ def test_query_only_mode_uses_existing_index_without_source_document(local_tmp_p
     assert index_path.exists()
     assert '"query": "direct-to-consumer"' in completed.stdout
     assert "Direct-to-Consumer" in completed.stdout
+    assert '"snippet"' in completed.stdout
+    assert '"highlight_terms"' in completed.stdout
+    assert '"field_scores"' not in completed.stdout
+
+
+def test_debug_explain_mode_includes_explain_fields(local_tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    md_path = local_tmp_path / "sample.md"
+    index_dir = local_tmp_path / "index"
+    index_path = index_dir / "sample_query_index.pkl.gz"
+
+    md_path.write_text(
+        "# Root\n\n"
+        "## Retrieval Design\n\n"
+        "Retrieval design uses deterministic candidate generation.\n\n"
+        "## Logging\n\n"
+        "Logging and observability improve diagnostics.\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "run_treeseek.py"),
+            "--md_path",
+            str(md_path),
+            "--if-add-node-summary",
+            "no",
+            "--build-query-index",
+            "yes",
+            "--include-text",
+            "yes",
+            "--index-output-dir",
+            str(index_dir),
+        ],
+        cwd=local_tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        check=True,
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "run_treeseek.py"),
+            "--index-path",
+            str(index_path),
+            "--query",
+            "\"retrieval design\"",
+            "--top-k",
+            "2",
+            "--debug-explain",
+            "yes",
+        ],
+        cwd=local_tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        check=True,
+    )
+
+    assert '"field_scores"' in completed.stdout
+    assert '"bonuses_applied"' in completed.stdout
+    assert '"phrase_matches"' in completed.stdout

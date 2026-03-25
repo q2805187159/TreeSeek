@@ -8,11 +8,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from rag import build_query_index, load_query_index, rerank_query_results, save_query_index, search_index
+from treeseek import build_query_index, load_query_index, rerank_query_results, save_query_index, search_index
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark RAG query index build/load/search flow")
+    parser = argparse.ArgumentParser(description="Benchmark TreeSeek query index build/load/search flow")
     parser.add_argument("--structure-path", required=True, help="Path to a *_structure.json file")
     parser.add_argument("--query", action="append", required=True, help="Query to execute; can be passed multiple times")
     parser.add_argument("--index-path", default=None, help="Optional output path for the serialized query index")

@@ -36,7 +36,7 @@ function githubRequest(method, path, body = null, retried = false) {
       headers: {
         'Authorization': `Bearer ${GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github+json',
-        'User-Agent': 'RAG-Autoclose/1.0',
+        'User-Agent': 'TreeSeek-Autoclose/1.0',
         'X-GitHub-Api-Version': '2022-11-28',
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
       },

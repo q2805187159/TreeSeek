@@ -1,21 +1,23 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to TreeSeek will be documented in this file.
 
-## 0.1.0 - 2026-03-23
+## 0.2.0 - 2026-03-25
 
 ### Added
 
-- Introduced the `rag` package as the new public project namespace
-- Added hybrid query indexing with inverted index plus bitmap and fallback postings
-- Added CLI support for index building, querying, and LLM reranking
-- Added benchmark and automated test coverage
+- Renamed the public project identity to `TreeSeek`
+- Added `.env.example` with documented runtime configuration
+- Added BM25-lite, phrase matching, proximity bonus, snippet/highlight, and explain mode
+- Added safer concurrency and RPM throttling for LLM calls
 
 ### Changed
 
-- Replaced the old project-facing branding and entrypoint naming with `RAG` and `run_rag.py`
-- Reworked the top-level documentation for the new standalone project identity
+- Renamed the public package namespace from `rag` to `treeseek`
+- Renamed the CLI entrypoint to `run_treeseek.py`
+- Removed default file log generation to keep the project clean
+- Cleaned debug-specific assets and reduced nonessential tests
 
 ### Removed
 
-- Removed the old cookbook and tutorial marketing content from the published project layout
+- Removed temporary debug-only PDF artifacts and internal implementation-debug tests

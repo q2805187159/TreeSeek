@@ -15,15 +15,15 @@ __all__ = [
 ]
 
 _MODULE_BY_EXPORT = {
-    "build_pdf_tree": "rag.pdf_tree",
-    "build_pdf_tree_from_opt": "rag.pdf_tree",
-    "build_markdown_tree": "rag.markdown_tree",
-    "build_query_index": "rag.indexing.builder",
-    "flatten_tree": "rag.indexing.builder",
-    "load_query_index": "rag.indexing.storage",
-    "save_query_index": "rag.indexing.storage",
-    "search_index": "rag.indexing.query_engine",
-    "rerank_query_results": "rag.indexing.llm_rerank",
+    "build_pdf_tree": "treeseek.pdf_tree",
+    "build_pdf_tree_from_opt": "treeseek.pdf_tree",
+    "build_markdown_tree": "treeseek.markdown_tree",
+    "build_query_index": "treeseek.indexing.builder",
+    "flatten_tree": "treeseek.indexing.builder",
+    "load_query_index": "treeseek.indexing.storage",
+    "save_query_index": "treeseek.indexing.storage",
+    "search_index": "treeseek.indexing.query_engine",
+    "rerank_query_results": "treeseek.indexing.llm_rerank",
 }
 
 

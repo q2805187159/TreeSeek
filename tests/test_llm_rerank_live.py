@@ -4,9 +4,9 @@ import os
 
 import pytest
 
-from rag.indexing.builder import build_query_index
-from rag.indexing.llm_rerank import rerank_query_results
-from rag.indexing.query_engine import search_index
+from treeseek.indexing.builder import build_query_index
+from treeseek.indexing.llm_rerank import rerank_query_results
+from treeseek.indexing.query_engine import search_index
 
 
 @pytest.mark.live_llm

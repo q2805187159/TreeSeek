@@ -7,7 +7,7 @@
   {
     "doc": "q1-fy25-earnings_structure.json",
     "query": "Disney+ subscribers",
-    "expected_node_ids": ["0003", "0014", "0001"]
+    "expected_node_ids": ["0006", "0007", "0031", "0032"]
   },
   {
     "doc": "PRML_structure.json",

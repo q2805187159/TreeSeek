@@ -1,8 +1,9 @@
 # Notice
 
-This repository is a downstream refactor based on the open-source PageIndex project:
+TreeSeek is a downstream refactor based on the open-source PageIndex project:
 
 - Upstream: https://github.com/VectifyAI/PageIndex
 
-Branding, documentation, package naming, and local retrieval behavior were modified for this repository.
-Please review the upstream license terms in `LICENSE`.
+This repository changes branding, package naming, CLI entrypoints, README structure, and local retrieval behavior while retaining clear attribution to the upstream codebase.
+
+Please review and comply with the upstream license terms in `LICENSE`.

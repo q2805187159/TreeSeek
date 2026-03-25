@@ -1,4 +1,4 @@
-from rag.indexing.builder import build_query_index, flatten_tree
+from treeseek.indexing.builder import build_query_index, flatten_tree
 
 
 def test_flatten_tree_preserves_parent_child_relationships(annual_report_doc):

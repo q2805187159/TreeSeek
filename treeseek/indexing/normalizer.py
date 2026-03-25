@@ -40,15 +40,17 @@ def count_terms(text: str | None) -> Counter[str]:
     return Counter(tokenize(text))
 
 
+def tokenize_with_positions(text: str | None) -> tuple[list[str], dict[str, list[int]]]:
+    tokens = tokenize(text)
+    positions: dict[str, list[int]] = {}
+    for idx, token in enumerate(tokens):
+        positions.setdefault(token, []).append(idx)
+    return tokens, positions
+
+
 def extract_phrases(query: str | None) -> list[str]:
     if not query:
         return []
     phrases = [normalize_text(match.group(1)) for match in QUOTED_PHRASE_RE.finditer(query)]
     phrases = [phrase for phrase in phrases if phrase]
-    if phrases:
-        return phrases
-
-    normalized = normalize_text(query)
-    if " " in normalized:
-        return [normalized]
-    return []
+    return phrases

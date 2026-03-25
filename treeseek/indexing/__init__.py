@@ -12,12 +12,12 @@ __all__ = [
 ]
 
 _MODULE_BY_EXPORT = {
-    "build_query_index": "rag.indexing.builder",
-    "flatten_tree": "rag.indexing.builder",
-    "load_query_index": "rag.indexing.storage",
-    "save_query_index": "rag.indexing.storage",
-    "search_index": "rag.indexing.query_engine",
-    "rerank_query_results": "rag.indexing.llm_rerank",
+    "build_query_index": "treeseek.indexing.builder",
+    "flatten_tree": "treeseek.indexing.builder",
+    "load_query_index": "treeseek.indexing.storage",
+    "save_query_index": "treeseek.indexing.storage",
+    "search_index": "treeseek.indexing.query_engine",
+    "rerank_query_results": "treeseek.indexing.llm_rerank",
 }
 
 

@@ -1,16 +1,22 @@
-# RAG Architecture
+# TreeSeek Architecture
 
 ## Overview
 
-RAG is a structured document retrieval toolkit built on top of a downstream refactor of PageIndex.
+TreeSeek is a structured long-document retrieval toolkit built from a downstream refactor of PageIndex.
 
-The current architecture keeps the useful upstream ideas:
+It keeps the useful upstream ideas:
 
 - hierarchical document trees
 - section-level summaries
 - document-aware retrieval
 
-It replaces the original project-facing packaging and retrieval surface with a new standalone layout centered on a local hybrid index.
+It extends them with a more engineering-oriented local retrieval layer:
+
+- local query index artifacts
+- BM25-lite scoring
+- snippet/highlight extraction
+- query-only CLI mode
+- controlled LLM concurrency and request throttling
 
 ## Core Flow
 
@@ -25,28 +31,20 @@ PDF / Markdown
 
 ## Main Components
 
-- `rag/pdf_tree.py`
-  - builds tree structures from PDF inputs
-- `rag/markdown_tree.py`
-  - builds tree structures from Markdown inputs
-- `rag/indexing/builder.py`
-  - flattens trees and constructs the local query artifact
-- `rag/indexing/query_engine.py`
-  - performs deterministic search, filtering, scoring, and ancestor expansion
-- `rag/indexing/llm_rerank.py`
-  - reranks the top deterministic candidates with an LLM
-
-## Retrieval Model
-
-The local search layer uses:
-
-- inverted index postings for term lookup
-- Roaring Bitmap postings when available
-- hash lookups for node IDs and normalized titles
-- page-range filtering
-- weighted scoring across title, summary, path, prefix summary, and optional leaf text
+- `treeseek/pdf_tree.py`
+  - PDF structure extraction, TOC handling, recursive subtree splitting
+- `treeseek/markdown_tree.py`
+  - Markdown heading-based tree generation
+- `treeseek/indexing/builder.py`
+  - local index artifact construction
+- `treeseek/indexing/query_engine.py`
+  - candidate generation, scoring, dedupe, diversity, explain
+- `treeseek/indexing/llm_rerank.py`
+  - optional reranking over top candidates
+- `treeseek/utils.py`
+  - provider compatibility, retry/backoff, concurrency and RPM control
 
 ## Attribution
 
-This repository is not presented as the original PageIndex project.
-It is an independently branded downstream refactor built from that upstream foundation, and the README keeps that lineage explicit.
+TreeSeek is not presented as the original PageIndex repository.
+It is a separately branded downstream project built on that upstream foundation.

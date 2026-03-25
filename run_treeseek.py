@@ -2,7 +2,7 @@ import argparse
 import os
 import json
 import copy
-from rag import (
+from treeseek import (
     build_pdf_tree_from_opt,
     build_query_index,
     load_query_index,
@@ -10,12 +10,12 @@ from rag import (
     save_query_index,
     search_index,
 )
-from rag.markdown_tree import (
+from treeseek.markdown_tree import (
     build_markdown_tree,
     extract_node_text_content,
     extract_nodes_from_markdown,
 )
-from rag.utils import ConfigLoader, add_node_text, get_page_tokens
+from treeseek.utils import ConfigLoader, add_node_text, get_page_tokens
 
 
 def is_yes(value):
@@ -89,6 +89,7 @@ def build_bonuses(opt):
         "phrase": opt.bonus_phrase,
         "leaf": opt.bonus_leaf,
         "all_terms_hit": opt.bonus_all_terms_hit,
+        "proximity": opt.bonus_proximity,
     }
 
 
@@ -104,12 +105,14 @@ def emit_query_results(doc_name, query, index_path, results):
 def execute_query(index, args, opt, index_path):
     top_k = args.top_k or opt.query_default_top_k
     leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
+    debug_explain = is_yes(args.debug_explain or opt.debug_explain_default)
     results = search_index(
         index,
         args.query,
         top_k=top_k,
         expand_ancestors=opt.query_expand_ancestors,
         leaf_only=leaf_only,
+        debug_explain=debug_explain,
     )
     if is_yes(args.rerank_with_llm):
         results = rerank_query_results(
@@ -162,6 +165,8 @@ if __name__ == "__main__":
                       help='Whether to rerank deterministic query results with an LLM')
     parser.add_argument('--rerank-top-k', type=int, default=None,
                       help='Number of top results to send to the LLM reranker')
+    parser.add_argument('--debug-explain', type=str, default='no',
+                      help='Whether to include detailed explain fields in query results')
                       
     # Markdown specific arguments
     parser.add_argument('--if-thinning', type=str, default='no',
@@ -202,6 +207,12 @@ if __name__ == "__main__":
             'bonus_phrase': None,
             'bonus_leaf': None,
             'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
         }
         opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
         query_index = load_query_index(args.index_path)
@@ -240,6 +251,12 @@ if __name__ == "__main__":
             'bonus_phrase': None,
             'bonus_leaf': None,
             'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
         }
         opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
 
@@ -277,6 +294,13 @@ if __name__ == "__main__":
                 postings_backend=opt.index_postings_backend,
                 field_weights=build_field_weights(opt),
                 bonuses=build_bonuses(opt),
+                snippet_max_chars=opt.snippet_max_chars,
+                snippet_context_chars=opt.snippet_context_chars,
+                debug_explain_default=is_yes(args.debug_explain or opt.debug_explain_default),
+                bm25_k1=opt.bm25_k1,
+                bm25_b=opt.bm25_b,
+                proximity_window=opt.proximity_window,
+                diversity_penalty=opt.diversity_penalty,
             )
 
         if query_index is not None and is_yes(args.build_query_index):
@@ -305,7 +329,7 @@ if __name__ == "__main__":
         import asyncio
         
         # Use ConfigLoader to get consistent defaults (matching PDF behavior)
-        from rag.utils import ConfigLoader
+        from treeseek.utils import ConfigLoader
         config_loader = ConfigLoader()
         
         # Create options dict with user args
@@ -330,6 +354,12 @@ if __name__ == "__main__":
             'bonus_phrase': None,
             'bonus_leaf': None,
             'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
         }
         
         # Load config with defaults from config.yaml
@@ -379,6 +409,13 @@ if __name__ == "__main__":
                 postings_backend=opt.index_postings_backend,
                 field_weights=build_field_weights(opt),
                 bonuses=build_bonuses(opt),
+                snippet_max_chars=opt.snippet_max_chars,
+                snippet_context_chars=opt.snippet_context_chars,
+                debug_explain_default=is_yes(args.debug_explain or opt.debug_explain_default),
+                bm25_k1=opt.bm25_k1,
+                bm25_b=opt.bm25_b,
+                proximity_window=opt.proximity_window,
+                diversity_penalty=opt.diversity_penalty,
             )
 
         if query_index is not None and is_yes(args.build_query_index):

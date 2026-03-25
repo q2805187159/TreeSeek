@@ -4,7 +4,7 @@ from collections import defaultdict
 from copy import deepcopy
 
 from .models import IndexedNode, QueryIndexArtifact
-from .normalizer import count_terms, normalize_text, normalize_title_key, tokenize
+from .normalizer import count_terms, normalize_text, normalize_title_key, tokenize, tokenize_with_positions
 from .postings import create_posting_list, resolve_postings_backend
 
 DEFAULT_FIELD_WEIGHTS = {
@@ -20,6 +20,7 @@ DEFAULT_BONUSES = {
     "phrase": 3.0,
     "leaf": 1.0,
     "all_terms_hit": 2.0,
+    "proximity": 1.5,
 }
 
 
@@ -101,6 +102,13 @@ def build_query_index(
     postings_backend: str = "bitmap",
     field_weights: dict[str, float] | None = None,
     bonuses: dict[str, float] | None = None,
+    snippet_max_chars: int = 320,
+    snippet_context_chars: int = 120,
+    debug_explain_default: bool = False,
+    bm25_k1: float = 1.2,
+    bm25_b: float = 0.75,
+    proximity_window: int = 12,
+    diversity_penalty: float = 0.75,
 ) -> QueryIndexArtifact:
     roots, resolved_doc_id = _resolve_roots_and_doc_id(document, doc_id)
     nodes = flatten_tree({"doc_name": resolved_doc_id, "structure": deepcopy(roots)}, resolved_doc_id)
@@ -120,6 +128,22 @@ def build_query_index(
     page_filter = {}
     field_term_frequencies: dict[int, dict[str, dict[str, int]]] = {}
     normalized_fields: dict[int, dict[str, str]] = {}
+    field_lengths: dict[int, dict[str, int]] = {}
+    field_term_positions: dict[int, dict[str, dict[str, list[int]]]] = {}
+    document_frequencies = {
+        "title": defaultdict(int),
+        "summary": defaultdict(int),
+        "prefix_summary": defaultdict(int),
+        "path_titles": defaultdict(int),
+        "text": defaultdict(int),
+    }
+    total_field_lengths = {
+        "title": 0,
+        "summary": 0,
+        "prefix_summary": 0,
+        "path_titles": 0,
+        "text": 0,
+    }
 
     for idx, node in enumerate(nodes):
         normalized_title_to_ids[normalize_title_key(node.title)].append(node.node_id)
@@ -136,29 +160,70 @@ def build_query_index(
             "text": normalize_text(node.text if include_text and node.is_leaf else ""),
         }
         field_term_frequencies[idx] = {}
+        field_lengths[idx] = {}
+        field_term_positions[idx] = {}
 
+        title_tokens, title_positions = tokenize_with_positions(node.title)
         title_counts = count_terms(node.title)
         field_term_frequencies[idx]["title"] = dict(title_counts)
+        field_lengths[idx]["title"] = len(title_tokens)
+        field_term_positions[idx]["title"] = title_positions
+        total_field_lengths["title"] += len(title_tokens)
+        for term in title_counts:
+            document_frequencies["title"][term] += 1
         _add_terms(title_terms, title_counts, idx, backend)
 
-        path_counts = count_terms(" ".join(node.path_titles))
+        path_text = " ".join(node.path_titles)
+        path_tokens, path_positions = tokenize_with_positions(path_text)
+        path_counts = count_terms(path_text)
         field_term_frequencies[idx]["path_titles"] = dict(path_counts)
+        field_lengths[idx]["path_titles"] = len(path_tokens)
+        field_term_positions[idx]["path_titles"] = path_positions
+        total_field_lengths["path_titles"] += len(path_tokens)
+        for term in path_counts:
+            document_frequencies["path_titles"][term] += 1
         _add_terms(path_terms, path_counts, idx, backend)
 
+        summary_tokens, summary_positions = tokenize_with_positions(node.summary)
         summary_counts = count_terms(node.summary)
         field_term_frequencies[idx]["summary"] = dict(summary_counts)
+        field_lengths[idx]["summary"] = len(summary_tokens)
+        field_term_positions[idx]["summary"] = summary_positions
+        total_field_lengths["summary"] += len(summary_tokens)
+        for term in summary_counts:
+            document_frequencies["summary"][term] += 1
         _add_terms(summary_terms, summary_counts, idx, backend)
 
+        prefix_tokens, prefix_positions = tokenize_with_positions(node.prefix_summary)
         prefix_summary_counts = count_terms(node.prefix_summary)
         field_term_frequencies[idx]["prefix_summary"] = dict(prefix_summary_counts)
+        field_lengths[idx]["prefix_summary"] = len(prefix_tokens)
+        field_term_positions[idx]["prefix_summary"] = prefix_positions
+        total_field_lengths["prefix_summary"] += len(prefix_tokens)
+        for term in prefix_summary_counts:
+            document_frequencies["prefix_summary"][term] += 1
         _add_terms(prefix_summary_terms, prefix_summary_counts, idx, backend)
 
         if include_text and node.is_leaf and node.text:
+            text_tokens, text_positions = tokenize_with_positions(node.text)
             text_counts = count_terms(node.text)
             field_term_frequencies[idx]["text"] = dict(text_counts)
+            field_lengths[idx]["text"] = len(text_tokens)
+            field_term_positions[idx]["text"] = text_positions
+            total_field_lengths["text"] += len(text_tokens)
+            for term in text_counts:
+                document_frequencies["text"][term] += 1
             _add_terms(text_terms, text_counts, idx, backend)
         else:
             field_term_frequencies[idx]["text"] = {}
+            field_lengths[idx]["text"] = 0
+            field_term_positions[idx]["text"] = {}
+
+    document_count = max(len(nodes), 1)
+    average_field_lengths = {
+        field_name: (total_field_lengths[field_name] / document_count) if document_count else 0.0
+        for field_name in total_field_lengths
+    }
 
     return QueryIndexArtifact(
         doc_id=resolved_doc_id,
@@ -177,8 +242,20 @@ def build_query_index(
         page_filter=page_filter,
         field_term_frequencies=field_term_frequencies,
         normalized_fields=normalized_fields,
+        field_lengths=field_lengths,
+        field_term_positions=field_term_positions,
+        document_count=document_count,
+        document_frequencies={field_name: dict(values) for field_name, values in document_frequencies.items()},
+        average_field_lengths=average_field_lengths,
         field_weights={**DEFAULT_FIELD_WEIGHTS, **(field_weights or {})},
         bonuses={**DEFAULT_BONUSES, **(bonuses or {})},
         postings_backend=backend,
         include_text=include_text,
+        snippet_max_chars=snippet_max_chars,
+        snippet_context_chars=snippet_context_chars,
+        debug_explain_default=debug_explain_default,
+        bm25_k1=bm25_k1,
+        bm25_b=bm25_b,
+        proximity_window=proximity_window,
+        diversity_penalty=diversity_penalty,
     )

@@ -31,6 +31,7 @@ class QueryRequest:
     depth: int | None = None
     min_page: int | None = None
     max_page: int | None = None
+    debug_explain: bool = False
 
 
 @dataclass(slots=True)
@@ -45,9 +46,15 @@ class QueryResult:
     matched_fields: list[str] = field(default_factory=list)
     ancestor_ids: list[str] = field(default_factory=list)
     summary: str | None = None
+    snippet: str | None = None
+    highlight_terms: list[str] = field(default_factory=list)
+    snippet_field: str | None = None
+    field_scores: dict[str, float] | None = None
+    bonuses_applied: list[dict[str, float | str]] = field(default_factory=list)
+    phrase_matches: dict[str, list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "doc_id": self.doc_id,
             "node_id": self.node_id,
             "title": self.title,
@@ -58,7 +65,17 @@ class QueryResult:
             "matched_fields": list(self.matched_fields),
             "ancestor_ids": list(self.ancestor_ids),
             "summary": self.summary,
+            "snippet": self.snippet,
+            "highlight_terms": list(self.highlight_terms),
+            "snippet_field": self.snippet_field,
         }
+        if self.field_scores:
+            payload["field_scores"] = dict(self.field_scores)
+        if self.bonuses_applied:
+            payload["bonuses_applied"] = list(self.bonuses_applied)
+        if self.phrase_matches:
+            payload["phrase_matches"] = dict(self.phrase_matches)
+        return payload
 
 
 @dataclass
@@ -83,3 +100,15 @@ class QueryIndexArtifact:
     bonuses: dict[str, float] = field(default_factory=dict)
     postings_backend: str = "sorted"
     include_text: bool = False
+    snippet_max_chars: int = 320
+    snippet_context_chars: int = 120
+    document_count: int = 0
+    document_frequencies: dict[str, dict[str, int]] = field(default_factory=dict)
+    average_field_lengths: dict[str, float] = field(default_factory=dict)
+    field_lengths: dict[int, dict[str, int]] = field(default_factory=dict)
+    field_term_positions: dict[int, dict[str, dict[str, list[int]]]] = field(default_factory=dict)
+    debug_explain_default: bool = False
+    bm25_k1: float = 1.2
+    bm25_b: float = 0.75
+    proximity_window: int = 12
+    diversity_penalty: float = 0.75

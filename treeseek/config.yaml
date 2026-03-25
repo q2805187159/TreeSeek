@@ -22,3 +22,19 @@ bonus_exact_title: 5.0
 bonus_phrase: 3.0
 bonus_leaf: 1.0
 bonus_all_terms_hit: 2.0
+bonus_proximity: 1.5
+bm25_k1: 1.2
+bm25_b: 0.75
+proximity_window: 12
+diversity_penalty: 0.75
+debug_explain_default: "no"
+recursive_split_enabled: "yes"
+recursive_split_min_pages: 4
+recursive_split_min_tokens: 2000
+recursive_split_max_depth: 3
+recursive_split_heading_patterns:
+  - "^\\d+\\.\\d+"
+  - "^\\d+\\.\\d+\\.\\d+"
+  - "^[A-Z][A-Za-z\\s\\-/]{3,}$"
+snippet_max_chars: 320
+snippet_context_chars: 120

@@ -1,54 +1,85 @@
-# RAG
+# TreeSeek
 
-一个结构化文档检索工具包，用于把长 PDF 或 Markdown 文档转换为层级树，并构建可查询的混合索引。
+Structured, local-first retrieval toolkit for long PDFs and Markdown documents.
 
-> 本仓库是基于开源项目 [PageIndex](https://github.com/VectifyAI/PageIndex) 进行的下游重构。  
-> 我们替换了原有的品牌命名、包结构、CLI 入口和面向产品的说明文档，使这个仓库能够以一个独立项目的形式运行，同时明确保留对上游项目的来源说明。
+> TreeSeek is a downstream refactor based on the open-source [PageIndex](https://github.com/VectifyAI/PageIndex) project.  
+> It keeps the useful upstream idea of hierarchical document trees, while rebuilding the engineering surface around local indexing, controllable querying, explainability, and production-oriented runtime controls.
 
-## 这个项目能做什么
+---
 
-RAG 目前聚焦两个核心工作流：
+## What Is TreeSeek
 
-1. 从长 PDF 或 Markdown 文档中构建结构化树。
-2. 在这棵树之上构建本地查询索引，用于确定性检索和可选的 LLM 重排序。
+TreeSeek is designed for teams that need to work with long professional documents where:
 
-当前实现组合了以下能力：
+- structure matters more than chunk similarity
+- page ranges and section boundaries matter
+- answers need to be traceable
+- local indexing and repeated querying should be cheap and controllable
 
-- 层级化文档解析
-- 倒排索引检索
-- 可用时使用 Roaring Bitmap postings
-- 基于哈希的快速直达查找
-- 页码范围过滤
-- 对候选结果进行可选的 LLM 重排序
+TreeSeek currently focuses on two major workflows:
 
-## 与原始 PageIndex 的差异
+1. Build a structured tree from PDF or Markdown documents
+2. Build a local query index on top of that tree for continuous retrieval
 
-下表对比的是：
+Current retrieval stack includes:
 
-- 修改前：上游仓库 [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex)
-- 修改后：当前仓库 `RAG`
+- hierarchical document parsing
+- local inverted index
+- Roaring Bitmap postings when available
+- BM25-lite ranking
+- phrase and proximity bonuses
+- snippet and highlight extraction
+- optional LLM reranking
+- query-only mode with prebuilt index reuse
 
-| 对比项 | 原始 PageIndex | 当前 RAG |
+## TreeSeek vs Original PageIndex
+
+| Item | Original PageIndex | TreeSeek |
 | --- | --- | --- |
-| 对外项目定位 | 以“Vectorless, Reasoning-based RAG”为核心叙事，强调树检索、Chat Platform、MCP、API 与官方生态 | 以本地可运行的结构化 RAG 工具包为核心，强调建树、混合索引、本地查询与可选 LLM 重排序 |
-| 开源 CLI 主路径 | 主要展示“从 PDF / Markdown 生成树结构” | 同时支持“生成树 + 构建索引 + 连续查询 + 可选 rerank” |
-| 查询执行层 | README 中主要强调基于树结构和 LLM 的 reasoning/tree search 思路 | 增加本地混合检索层：倒排索引、Roaring Bitmap postings、哈希直达和页码过滤 |
-| 连续查询能力 | 默认工作流更偏向先生成树，再由外部流程做检索 | 支持先建一次索引，再通过 `--index-path` 直接连续查询，不必重复解析 PDF |
+| Public identity | Product-style PageIndex branding | Independent TreeSeek branding |
+| Main package | `pageindex` | `treeseek` |
+| CLI entry | `run_pageindex.py` | `run_treeseek.py` |
+| Focus | Tree generation and reasoning-oriented retrieval narrative | Tree generation plus local hybrid retrieval, explainability, and runtime controls |
+| Query reuse | More external-workflow oriented | Built-in `--index-path` query-only mode |
+| Ranking | Tree + LLM reasoning emphasis | BM25-lite + phrase + proximity + diversity + optional rerank |
+| Runtime controls | Not the main emphasis in README | Explicit concurrency, RPM, retry, and debug controls |
 
-## 关键能力
+## Core Capabilities
 
-- 将 PDF 解析为带页码区间和可选摘要的章节树
-- 按 Markdown 标题层级构建章节树
-- 为本地搜索构建压缩的查询索引工件
-- 支持按标题、摘要、路径或叶子节点文本检索
-- 支持按叶子节点和页码范围过滤
-- 支持用 LLM 对确定性检索结果进行重排序
-- 支持本地 benchmark，评估构建、加载和查询延迟
+- Parse PDFs into hierarchical section trees
+- Parse Markdown headings into trees
+- Build local query indexes for repeated retrieval
+- Return `snippet`, `highlight_terms`, and `snippet_field`
+- Support explain mode with `field_scores`, `bonuses_applied`, and `phrase_matches`
+- Reuse prebuilt indexes without reparsing source files
+- Run with OpenAI-compatible providers via LiteLLM
+- Apply built-in concurrency and RPM controls for fragile provider limits
 
-## 项目结构
+## Suitable Scenarios
+
+| Scenario | Typical Documents | Why TreeSeek Fits |
+| --- | --- | --- |
+| Finance and investment research | annual reports, quarterly filings, earnings decks, prospectuses | strong structure, long sections, page-sensitive evidence |
+| Legal and compliance | contracts, regulations, audit manuals, internal policies | traceable section retrieval is more important than loose similarity |
+| Technical documentation | API docs, deployment manuals, architecture docs, runbooks | heading hierarchy is strong and repeated querying is common |
+| Enterprise knowledge base | SOPs, training docs, FAQs, internal standards | local indexing and repeatable query flows reduce support cost |
+| Manufacturing and operations | equipment manuals, maintenance guides, incident playbooks | page ranges, tables, and procedural sections matter |
+| Public sector and policy | notices, standards, policy documents, reports | long-form structured documents benefit from explainable retrieval |
+
+## Commercial Value
+
+| Value Direction | Practical Impact |
+| --- | --- |
+| Lower document handling cost | replace manual PDF searching with structured local retrieval |
+| Better traceability | every result stays tied to title, page span, and snippet |
+| Easier private deployment | no external vector DB is required for the core workflow |
+| Better repeated-query economics | build once, query many times with `--index-path` |
+| Better debugging and tuning | explain mode and runtime controls make retrieval behavior inspectable |
+
+## Project Layout
 
 ```text
-rag/
+treeseek/
   __init__.py
   config.yaml
   pdf_tree.py
@@ -63,99 +94,92 @@ rag/
     postings.py
     query_engine.py
     scoring.py
+    snippets.py
     storage.py
-run_rag.py
-tests/
-scripts/
+run_treeseek.py
 docs/
+scripts/
+tests/
 ```
 
-## 安装
+## Installation
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-位图后端依赖 `pyroaring`，该依赖已经包含在 `requirements.txt` 中。
+Notes:
 
-## 环境变量
+- `pyroaring` is included for bitmap posting acceleration
+- LiteLLM is used as the unified model adapter layer
+- TreeSeek is tuned for OpenAI-compatible providers by default
 
-如果你要使用在线 LLM 重排序，请在本地创建 `.env` 文件：
+## Configuration Template
+
+Use [`.env.example`](/e:/python/PageIndex/.env.example) as the starting template.
+
+Recommended flow:
+
+1. Copy `.env.example` to `.env`
+2. Fill in `MODEL`, `API_KEY`, and `API_URL`
+3. Adjust TreeSeek runtime limits only if your provider requires it
+
+## Quick Start
+
+### Build a PDF tree
 
 ```bash
-MODEL=your_provider_model
-API_KEY=your_api_key
-API_URL=your_base_url
+python run_treeseek.py --pdf_path /path/to/document.pdf
 ```
 
-运行时也兼容 OpenAI 风格的环境变量命名，例如 `OPENAI_API_KEY`、`OPENAI_API_BASE` 和 `OPENAI_BASE_URL`。
-
-如果你使用的是 OpenAI-compatible 服务并传入的是服务端原生模型 ID，例如：
+### Build a Markdown tree
 
 ```bash
-MODEL=Pro/deepseek-ai/DeepSeek-V3.2
+python run_treeseek.py --md_path /path/to/document.md --if-add-node-summary no
 ```
 
-程序会在底层自动兼容 `litellm` 所需的 provider 前缀，不需要你手动改成 `openai/...`。
-
-## 快速开始
-
-### 构建 PDF 树
+### Build an index and query immediately
 
 ```bash
-python run_rag.py --pdf_path /path/to/document.pdf
-```
-
-### 构建 Markdown 树
-
-```bash
-python run_rag.py --md_path /path/to/document.md --if-add-node-summary no
-```
-
-### 构建查询索引并执行查询
-
-```bash
-python run_rag.py \
-  --md_path /path/to/document.md \
+python run_treeseek.py \
+  --pdf_path /path/to/document.pdf \
   --build-query-index yes \
   --include-text yes \
-  --query "direct-to-consumer" \
+  --query "retrieval design" \
   --top-k 5
 ```
 
-### 执行确定性检索并使用 LLM 重排序
+### Build once, query many times
+
+First build the index:
 
 ```bash
-python run_rag.py \
-  --pdf_path /path/to/document.pdf \
-  --build-query-index yes \
-  --query "risk factors liquidity" \
-  --top-k 10 \
-  --rerank-with-llm yes \
-  --rerank-top-k 3
-```
-
-### 建一次索引，后续直接查询
-
-第一次先建树并构建索引：
-
-```bash
-python run_rag.py \
+python run_treeseek.py \
   --pdf_path /path/to/document.pdf \
   --build-query-index yes \
   --include-text yes
 ```
 
-后续直接加载已有索引查询，不再重新解析 PDF：
+Then reuse it directly:
 
 ```bash
-python run_rag.py \
+python run_treeseek.py \
   --index-path results/document_query_index.pkl.gz \
   --query "retrieval design" \
   --top-k 5
 ```
 
-### 运行本地索引 benchmark
+### Show explain fields
+
+```bash
+python run_treeseek.py \
+  --index-path results/document_query_index.pkl.gz \
+  --query "\"retrieval design\"" \
+  --top-k 5 \
+  --debug-explain yes
+```
+
+### Run the benchmark
 
 ```bash
 python scripts/benchmark_query_index.py \
@@ -164,10 +188,10 @@ python scripts/benchmark_query_index.py \
   --query "supervisory developments"
 ```
 
-## 对外 Python API
+## Python API
 
 ```python
-from rag import (
+from treeseek import (
     build_pdf_tree,
     build_markdown_tree,
     build_query_index,
@@ -176,7 +200,7 @@ from rag import (
 )
 ```
 
-主要入口函数：
+Main entrypoints:
 
 - `build_pdf_tree(...)`
 - `build_markdown_tree(...)`
@@ -184,16 +208,9 @@ from rag import (
 - `search_index(...)`
 - `rerank_query_results(...)`
 
-## 输出内容
+## Query Output
 
-默认情况下，CLI 会写出：
-
-- 树结构 JSON：`results/<name>_structure.json`
-- 查询索引：`results/<name>_query_index.pkl.gz`
-
-如果你已经有查询索引，也可以通过 `--index-path` 进入 query-only 模式，直接查询而不重新解析源文档。
-
-查询结果会以 JSON 格式输出，并包含：
+Default query results include:
 
 - `node_id`
 - `title`
@@ -203,10 +220,31 @@ from rag import (
 - `matched_terms`
 - `matched_fields`
 - `ancestor_ids`
+- `snippet`
+- `highlight_terms`
+- `snippet_field`
 
-## 测试
+When `--debug-explain yes` is enabled, TreeSeek also returns:
 
-离线测试套件：
+- `field_scores`
+- `bonuses_applied`
+- `phrase_matches`
+
+## Runtime Controls
+
+TreeSeek exposes several runtime safety controls via environment variables:
+
+- `TREESEEK_LLM_MAX_CONCURRENCY`
+- `TREESEEK_LLM_MAX_RPM`
+- `TREESEEK_LLM_RETRY_BASE_DELAY`
+- `TREESEEK_LLM_RETRY_MAX_DELAY`
+- `TREESEEK_DEBUG_LOGS`
+
+These are especially useful when your model provider has strict organization-level concurrency or RPM limits.
+
+## Testing
+
+Recommended offline regression run:
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
@@ -216,10 +254,15 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
   tests/test_query_engine.py \
   tests/test_storage.py \
   tests/test_cli.py \
+  tests/test_snippets.py \
+  tests/test_pdf_recursive_split.py \
+  tests/test_scoring_bm25.py \
+  tests/test_phrase_proximity.py \
+  tests/test_result_diversity.py \
   -q -p no:cacheprovider
 ```
 
-在线 LLM 冒烟测试：
+Optional live LLM smoke test:
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
@@ -227,11 +270,20 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
   -q -p no:cacheprovider -m live_llm
 ```
 
-## 来源说明
+## Documentation
 
-本项目基于开源的 PageIndex 代码库重构而来，并明确保留与上游项目的关系说明。
+- [Architecture](docs/architecture.md)
+- [Enhancement Roadmap](docs/treeseek_enhancement_roadmap.md)
 
-- 上游项目：`VectifyAI/PageIndex`
-- 当前仓库目标：在保留上游基础能力的前提下，将其重塑为一个拥有独立公共标识、并具备本地混合检索层的结构化 RAG 工具包
+## Attribution
 
-请继续遵守上游项目的许可证要求。详见 `LICENSE` 和 `NOTICE.md`。
+TreeSeek is a downstream refactor built from the PageIndex codebase.
+
+- Upstream project: `VectifyAI/PageIndex`
+- Current goal: transform the upstream tree-oriented idea into a cleaner, local-first, engineering-oriented long-document retrieval toolkit
+
+Please continue to respect the upstream license terms.
+See:
+
+- `LICENSE`
+- `NOTICE.md`

@@ -4,9 +4,366 @@ import copy
 import math
 import random
 import re
+from collections import defaultdict
 from .utils import *
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+TOC_IGNORED_LINES = {
+    "table of contents",
+    "contents",
+}
+GENERIC_TOC_TITLES = {
+    "overview",
+    "background",
+    "design goals",
+    "implementation details",
+    "testing notes",
+    "detailed findings",
+    "summary",
+    "conclusion",
+}
+
+
+def _stage_log(stage: str, message: str, logger=None, **details):
+    if not is_debug_logs_enabled():
+        return
+    detail_text = ""
+    if details:
+        ordered = ", ".join(f"{key}={details[key]}" for key in sorted(details))
+        detail_text = f" | {ordered}"
+    print(f"[{stage}] {message}{detail_text}")
+    if logger:
+        logger.info({"stage": stage, "message": message, **details})
+
+
+def _heuristic_toc_detect(content: str | None):
+    text = str(content or "")
+    lines = [_normalize_toc_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None
+
+    joined = "\n".join(lines[:12]).lower()
+    has_contents_header = any(
+        line.lower() in TOC_IGNORED_LINES or line.lower().startswith("table of contents")
+        for line in lines[:5]
+    )
+    toc_like_entries = 0
+
+    for line in lines:
+        has_page_number = bool(re.search(r"(?:\.{2,}|\s)\s*\d{1,4}$", line))
+        looks_like_section = bool(re.match(r"^\d+(?:\.\d+)?\s*[A-Za-z]", line))
+        if has_page_number and (looks_like_section or len(line) >= 15):
+            toc_like_entries += 1
+
+    if has_contents_header and toc_like_entries >= 2:
+        return "yes"
+    if "table of contents" in joined and toc_like_entries >= 1:
+        return "yes"
+    return None
+
+
+def _normalize_toc_line(line: str | None) -> str:
+    if not line:
+        return ""
+    normalized = re.sub(r"\s+", " ", str(line)).strip()
+    normalized = normalized.strip("-*• ")
+    return normalized
+
+
+def _parse_toc_line_heuristically(raw_line: str):
+    line = _normalize_toc_line(raw_line)
+    if not line:
+        return None
+    if line.lower() in TOC_IGNORED_LINES:
+        return None
+    if "| page " in line.lower():
+        return None
+    if re.search(r"\bpage\s+\d+\s*/\s*\d+\b", line, re.IGNORECASE):
+        return None
+    if len(line) < 4 or len(line) > 220:
+        return None
+    if not re.search(r"[A-Za-z]", line):
+        return None
+
+    page_match = re.match(r"^(?P<body>.+?)(?:\s*:\s*|\s+)(?P<page>\d{1,4})$", line)
+    if not page_match:
+        return None
+
+    body = page_match.group("body").strip(" :-")
+    page = int(page_match.group("page"))
+    if not body:
+        return None
+
+    structure = None
+    title = body
+
+    structure_match = re.match(r"^(?P<structure>\d+(?:\.\d+)*|[A-Z])[\.\)]\s+(?P<title>.+)$", body)
+    if structure_match:
+        structure = structure_match.group("structure")
+        title = structure_match.group("title").strip()
+    else:
+        numeric_prefix_match = re.match(r"^(?P<structure>\d+(?:\.\d+)*)\s+(?P<title>.+)$", body)
+        if numeric_prefix_match:
+            structure = numeric_prefix_match.group("structure")
+            title = numeric_prefix_match.group("title").strip()
+
+    if not title or title.lower() in TOC_IGNORED_LINES:
+        return None
+
+    return {
+        "structure": structure,
+        "title": title,
+        "page": page,
+    }
+
+
+def _canonicalize_generated_title(title: str | None) -> str:
+    title = _normalize_toc_line(title)
+    title = re.sub(r"^section\s+\d+(?:\.\d+)*\s*:\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^[A-Z]?\d+(?:\.\d+)*\s+", "", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title.lower()
+
+
+def _is_generic_generated_title(title: str | None) -> bool:
+    canonical = _canonicalize_generated_title(title)
+    return canonical in GENERIC_TOC_TITLES
+
+
+def _specificity_score(title: str | None, parent_title: str | None = None) -> int:
+    original = _normalize_toc_line(title)
+    canonical = _canonicalize_generated_title(title)
+    score = 0
+
+    if not original:
+        return -1000
+
+    if parent_title and canonical == _canonicalize_generated_title(parent_title):
+        score -= 80
+
+    if _is_generic_generated_title(original):
+        score -= 40
+
+    if re.search(r"\b(table|figure|appendix|exhibit|chart)\b", original, re.IGNORECASE):
+        score += 100
+    if re.match(r"^[A-Z]?\d+(?:\.\d+)*\s+", original):
+        score += 20
+    if len(original.split()) >= 5:
+        score += 20
+    if re.search(r"[,:;-]", original):
+        score += 5
+
+    return score
+
+
+def _post_process_generated_toc_items(items, parent_title: str | None = None):
+    if not items:
+        return []
+
+    cleaned = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _normalize_toc_line(item.get("title"))
+        if not title:
+            continue
+        candidate = copy.deepcopy(item)
+        candidate["title"] = title
+        physical_index = convert_physical_index_to_int(candidate.get("physical_index"))
+        candidate["physical_index"] = physical_index
+        dedupe_key = (physical_index, _canonicalize_generated_title(title))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(candidate)
+
+    grouped = defaultdict(list)
+    for item in cleaned:
+        grouped[item.get("physical_index")].append(item)
+
+    filtered = []
+    def _group_sort_key(value):
+        if value is None:
+            return (1, 0)
+        if isinstance(value, int):
+            return (0, value)
+        normalized = convert_physical_index_to_int(value)
+        if normalized is None:
+            return (1, 0)
+        return (0, normalized)
+
+    for physical_index in sorted(grouped, key=_group_sort_key):
+        group = grouped[physical_index]
+        scores = {id(item): _specificity_score(item.get("title"), parent_title=parent_title) for item in group}
+        best_score = max(scores.values())
+        has_strong_specific = best_score >= 60
+
+        for idx, item in enumerate(group):
+            score = scores[id(item)]
+            title = item.get("title")
+            canonical_title = _canonicalize_generated_title(title)
+            parent_canonical = _canonicalize_generated_title(parent_title) if parent_title else None
+            if has_strong_specific and _is_generic_generated_title(title) and score < best_score:
+                continue
+            if parent_canonical and canonical_title == parent_canonical and has_strong_specific:
+                continue
+            if idx > 0 and parent_canonical and canonical_title == parent_canonical:
+                continue
+            filtered.append(item)
+
+    if not filtered:
+        return []
+
+    merged = []
+    last_seen_page_by_title = {}
+    for item in filtered:
+        current = copy.deepcopy(item)
+        current_title = _canonicalize_generated_title(current.get("title"))
+        current_page = current.get("physical_index")
+        last_seen_page = last_seen_page_by_title.get(current_title)
+
+        if (
+            current_title
+            and isinstance(current_page, int)
+            and isinstance(last_seen_page, int)
+            and current_page == last_seen_page + 1
+        ):
+            last_seen_page_by_title[current_title] = current_page
+            continue
+
+        merged.append(current)
+        if current_title and isinstance(current_page, int):
+            last_seen_page_by_title[current_title] = current_page
+
+    return merged
+
+
+def _toc_transformer_heuristic(toc_content):
+    lines = [_normalize_toc_line(line) for line in str(toc_content).splitlines()]
+    parsed_entries = []
+    seen = set()
+
+    for line in lines:
+        entry = _parse_toc_line_heuristically(line)
+        if not entry:
+            continue
+        dedupe_key = (entry["structure"], entry["title"].lower(), entry["page"])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        parsed_entries.append(entry)
+
+    if len(parsed_entries) >= 3:
+        return parsed_entries
+    return None
+
+
+def _split_toc_content_for_parallel_transform(toc_content, max_lines_per_chunk=24, max_chars=3500):
+    raw_lines = [_normalize_toc_line(line) for line in str(toc_content).splitlines()]
+    lines = [line for line in raw_lines if line]
+    if not lines:
+        return []
+
+    chunks = []
+    current_lines = []
+    current_chars = 0
+    for line in lines:
+        projected_chars = current_chars + len(line) + 1
+        if current_lines and (len(current_lines) >= max_lines_per_chunk or projected_chars > max_chars):
+            chunks.append("\n".join(current_lines))
+            current_lines = [line]
+            current_chars = len(line)
+        else:
+            current_lines.append(line)
+            current_chars = projected_chars
+    if current_lines:
+        chunks.append("\n".join(current_lines))
+    return chunks
+
+
+def _toc_transform_chunk(chunk_content, model=None):
+    prompt = f"""
+    You are given a PARTIAL table of contents from a document.
+    Transform only the provided entries into a JSON array.
+
+    Return JSON only in this format:
+    [
+      {{
+        "structure": "<x.x or null>",
+        "title": "<section title>",
+        "page": <page number or null>
+      }}
+    ]
+
+    Rules:
+    - Only output entries that are present in the partial table of contents.
+    - Do not invent entries.
+    - Keep titles concise and faithful to the source.
+    - If there is no visible hierarchy index, use null.
+    - If there is no visible page number, use null.
+
+    Partial table of contents:
+    {chunk_content}
+    """
+
+    response = llm_completion(model=model, prompt=prompt, debug_label="toc_transform_chunk")
+    parsed = extract_json(response, debug_label="toc_transform_chunk")
+    return parsed if isinstance(parsed, list) else []
+
+
+def _toc_transformer_parallel(toc_content, model=None, max_workers=4, logger=None):
+    chunks = _split_toc_content_for_parallel_transform(toc_content)
+    if len(chunks) <= 1:
+        _stage_log("toc_transformer", "parallel path skipped", logger=logger, reason="single_chunk")
+        return None
+
+    _stage_log("toc_transformer", "parallel path started", logger=logger, chunks=len(chunks), workers=min(max_workers, len(chunks)))
+    results = {}
+    start_time = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(chunks))) as executor:
+        future_map = {
+            executor.submit(_toc_transform_chunk, chunk, model): idx
+            for idx, chunk in enumerate(chunks)
+        }
+        for future in as_completed(future_map):
+            idx = future_map[future]
+            try:
+                results[idx] = future.result()
+            except Exception:
+                _stage_log("toc_transformer", "parallel path failed", logger=logger, chunk_index=idx)
+                return None
+
+    merged = []
+    seen = set()
+    for idx in range(len(chunks)):
+        for item in results.get(idx, []):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            page = item.get("page")
+            structure = item.get("structure")
+            dedupe_key = (structure, title.lower(), page)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append({
+                "structure": structure,
+                "title": title,
+                "page": page,
+            })
+
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    if len(merged) >= 3:
+        _stage_log("toc_transformer", "parallel path completed", logger=logger, entries=len(merged), duration_ms=duration_ms)
+        return merged
+
+    _stage_log("toc_transformer", "parallel path produced insufficient entries", logger=logger, entries=len(merged), duration_ms=duration_ms)
+    return None
 
 
 ################### check title in page #########################################################
@@ -18,6 +375,13 @@ async def check_title_appearance(item, page_list, start_index=1, model=None):
     
     page_number = item['physical_index']
     page_text = page_list[page_number-start_index][0]
+    _stage_log(
+        "check_title_appearance",
+        "request",
+        title=title,
+        page_number=page_number,
+        page_text_chars=len(page_text or ""),
+    )
 
     
     prompt = f"""
@@ -36,8 +400,22 @@ async def check_title_appearance(item, page_list, start_index=1, model=None):
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = await llm_acompletion(model=model, prompt=prompt)
-    response = extract_json(response)
+    response = await llm_acompletion(model=model, prompt=prompt, debug_label="check_title_appearance")
+    _stage_log(
+        "check_title_appearance",
+        "response_received",
+        title=title,
+        page_number=page_number,
+        response_chars=len(response or ""),
+    )
+    response = extract_json(response, debug_label="check_title_appearance")
+    _stage_log(
+        "check_title_appearance",
+        "response_parsed",
+        title=title,
+        page_number=page_number,
+        parsed_keys=",".join(sorted(response.keys())) if isinstance(response, dict) else "non_dict",
+    )
     if 'answer' in response:
         answer = response['answer']
     else:
@@ -64,8 +442,8 @@ async def check_title_appearance_in_start(title, page_text, model=None, logger=N
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = await llm_acompletion(model=model, prompt=prompt)
-    response = extract_json(response)
+    response = await llm_acompletion(model=model, prompt=prompt, debug_label="check_title_appearance_in_start")
+    response = extract_json(response, debug_label="check_title_appearance_in_start")
     if logger:
         logger.info(f"Response: {response}")
     return response.get("start_begin", "no")
@@ -90,6 +468,7 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
             valid_items.append(item)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    flush_litellm_logging_worker_sync(timeout_seconds=2.0)
     for item, result in zip(valid_items, results):
         if isinstance(result, Exception):
             if logger:
@@ -102,6 +481,10 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
 
 
 def toc_detector_single_page(content, model=None):
+    heuristic_result = _heuristic_toc_detect(content)
+    if heuristic_result is not None:
+        return heuristic_result
+
     prompt = f"""
     Your job is to detect if there is a table of content provided in the given text.
 
@@ -116,10 +499,15 @@ def toc_detector_single_page(content, model=None):
     Directly return the final JSON structure. Do not output anything else.
     Please note: abstract,summary, notation list, figure list, table list, etc. are not table of contents."""
 
-    response = llm_completion(model=model, prompt=prompt)
+    response = llm_completion(model=model, prompt=prompt, debug_label="toc_detector_single_page")
     # print('response', response)
-    json_content = extract_json(response)    
-    return json_content['toc_detected']
+    json_content = extract_json(response, debug_label="toc_detector_single_page")
+    detected = json_content.get('toc_detected') if isinstance(json_content, dict) else None
+    if detected in {'yes', 'no'}:
+        return detected
+
+    logging.warning("toc_detector_single_page: invalid or empty model response, falling back to 'no'")
+    return 'no'
 
 
 def check_if_toc_extraction_is_complete(content, toc, model=None):
@@ -135,8 +523,8 @@ def check_if_toc_extraction_is_complete(content, toc, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\n Document:\n' + content + '\n Table of contents:\n' + toc
-    response = llm_completion(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    response = llm_completion(model=model, prompt=prompt, debug_label="check_if_toc_extraction_is_complete")
+    json_content = extract_json(response, debug_label="check_if_toc_extraction_is_complete")
     return json_content['completed']
 
 
@@ -153,8 +541,8 @@ def check_if_toc_transformation_is_complete(content, toc, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\n Raw Table of contents:\n' + content + '\n Cleaned Table of contents:\n' + toc
-    response = llm_completion(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    response = llm_completion(model=model, prompt=prompt, debug_label="check_if_toc_transformation_is_complete")
+    json_content = extract_json(response, debug_label="check_if_toc_transformation_is_complete")
     return json_content['completed']
 
 def extract_toc_content(content, model=None):
@@ -165,7 +553,7 @@ def extract_toc_content(content, model=None):
 
     Directly return the full table of contents content. Do not output anything else."""
 
-    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True, debug_label="extract_toc_content:init")
     
     if_complete = check_if_toc_transformation_is_complete(content, response, model)
     if if_complete == "yes" and finish_reason == "finished":
@@ -176,7 +564,7 @@ def extract_toc_content(content, model=None):
         {"role": "assistant", "content": response},    
     ]
     prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
-    new_response, finish_reason = llm_completion(model=model, prompt=prompt, chat_history=chat_history, return_finish_reason=True)
+    new_response, finish_reason = llm_completion(model=model, prompt=prompt, chat_history=chat_history, return_finish_reason=True, debug_label="extract_toc_content:continue")
     response = response + new_response
     if_complete = check_if_toc_transformation_is_complete(content, response, model)
     
@@ -193,7 +581,7 @@ def extract_toc_content(content, model=None):
             {"role": "assistant", "content": response},
         ]
         prompt = f"""please continue the generation of table of contents , directly output the remaining part of the structure"""
-        new_response, finish_reason = llm_completion(model=model, prompt=prompt, chat_history=chat_history, return_finish_reason=True)
+        new_response, finish_reason = llm_completion(model=model, prompt=prompt, chat_history=chat_history, return_finish_reason=True, debug_label="extract_toc_content:retry")
         response = response + new_response
         if_complete = check_if_toc_transformation_is_complete(content, response, model)
     
@@ -215,8 +603,8 @@ def detect_page_index(toc_content, model=None):
     }}
     Directly return the final JSON structure. Do not output anything else."""
 
-    response = llm_completion(model=model, prompt=prompt)
-    json_content = extract_json(response)
+    response = llm_completion(model=model, prompt=prompt, debug_label="detect_page_index")
+    json_content = extract_json(response, debug_label="detect_page_index")
     return json_content['page_index_given_in_toc']
 
 def toc_extractor(page_list, toc_page_list, model):
@@ -264,14 +652,15 @@ def toc_index_extractor(toc, content, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = toc_extractor_prompt + '\nTable of contents:\n' + str(toc) + '\nDocument pages:\n' + content
-    response = llm_completion(model=model, prompt=prompt)
-    json_content = extract_json(response)    
+    response = llm_completion(model=model, prompt=prompt, debug_label="toc_index_extractor")
+    json_content = extract_json(response, debug_label="toc_index_extractor")    
     return json_content
 
 
 
-def toc_transformer(toc_content, model=None):
-    print('start toc_transformer')
+def _toc_transformer_sequential(toc_content, model=None, logger=None):
+    _stage_log("toc_transformer", "sequential path started", logger=logger)
+    start_time = time.perf_counter()
     init_prompt = """
     You are given a table of contents, You job is to transform the whole table of content into a JSON format included table_of_contents.
 
@@ -292,11 +681,13 @@ def toc_transformer(toc_content, model=None):
     Directly return the final JSON structure, do not output anything else. """
 
     prompt = init_prompt + '\n Given table of contents\n:' + toc_content
-    last_complete, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+    last_complete, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True, debug_label="toc_transformer_sequential:init")
     if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
     if if_complete == "yes" and finish_reason == "finished":
-        last_complete = extract_json(last_complete)
+        last_complete = extract_json(last_complete, debug_label="toc_transformer_sequential:init")
         cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        _stage_log("toc_transformer", "sequential path completed", logger=logger, entries=len(cleaned_response), duration_ms=duration_ms)
         return cleaned_response
     
     last_complete = get_json_content(last_complete)
@@ -321,7 +712,7 @@ def toc_transformer(toc_content, model=None):
 
         Please continue the json structure, directly output the remaining part of the json structure."""
 
-        new_complete, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+        new_complete, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True, debug_label="toc_transformer_sequential:continue")
 
         if new_complete.startswith('```json'):
             new_complete =  get_json_content(new_complete)
@@ -333,7 +724,28 @@ def toc_transformer(toc_content, model=None):
     last_complete = json.loads(last_complete)
 
     cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    _stage_log("toc_transformer", "sequential path completed", logger=logger, entries=len(cleaned_response), duration_ms=duration_ms)
     return cleaned_response
+
+
+def toc_transformer(toc_content, model=None, logger=None):
+    _stage_log("toc_transformer", "started", logger=logger)
+    start_time = time.perf_counter()
+
+    heuristic_result = _toc_transformer_heuristic(toc_content)
+    if heuristic_result:
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        _stage_log("toc_transformer", "heuristic path completed", logger=logger, entries=len(heuristic_result), duration_ms=duration_ms)
+        return convert_page_to_int(heuristic_result)
+
+    _stage_log("toc_transformer", "heuristic path skipped", logger=logger, reason="insufficient_entries")
+    parallel_result = _toc_transformer_parallel(toc_content, model=model, logger=logger)
+    if parallel_result:
+        return convert_page_to_int(parallel_result)
+
+    _stage_log("toc_transformer", "falling back to sequential path", logger=logger)
+    return _toc_transformer_sequential(toc_content, model=model, logger=logger)
     
 
 
@@ -482,8 +894,8 @@ def add_page_number_to_toc(part, structure, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = fill_prompt_seq + f"\n\nCurrent Partial Document:\n{part}\n\nGiven Structure\n{json.dumps(structure, indent=2)}\n"
-    current_json_raw = llm_completion(model=model, prompt=prompt)
-    json_result = extract_json(current_json_raw)
+    current_json_raw = llm_completion(model=model, prompt=prompt, debug_label="add_page_number_to_toc")
+    json_result = extract_json(current_json_raw, debug_label="add_page_number_to_toc")
     
     for item in json_result:
         if 'start' in item:
@@ -515,6 +927,26 @@ def generate_toc_continue(toc_content, part, model=None):
 
     For the title, you need to extract the original title from the text, only fix the space inconsistency.
 
+    Prefer the MOST SPECIFIC visible heading on a page.
+    If both a generic subsection label and a more specific heading exist on the same page, keep the more specific one.
+    Examples of generic subsection labels to avoid when a more specific title exists:
+    - Overview
+    - Background
+    - Design Goals
+    - Implementation Details
+    - Testing Notes
+    - Detailed Findings
+    - Summary
+    - Conclusion
+
+    Prefer specific table / figure / appendix titles such as:
+    - Table R.1. ...
+    - Figure 2. ...
+    - Appendix A ...
+
+    Do not include page headers, page footers, or document title lines such as:
+    - <document name> | Page X / Y
+
     The provided text contains tags like <physical_index_X> and <physical_index_X> to indicate the start and end of page X. \
     
     For the physical_index, you need to extract the physical index of the start of the section from the text. Keep the <physical_index_X> format.
@@ -532,9 +964,10 @@ def generate_toc_continue(toc_content, part, model=None):
     Directly return the additional part of the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\nGiven text\n:' + part + '\nPrevious tree structure\n:' + json.dumps(toc_content, indent=2)
-    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True, debug_label="generate_toc_continue")
     if finish_reason == 'finished':
-        return extract_json(response)
+        parsed = extract_json(response, debug_label="generate_toc_continue")
+        return _post_process_generated_toc_items(parsed)
     else:
         raise Exception(f'finish reason: {finish_reason}')
     
@@ -547,6 +980,26 @@ def generate_toc_init(part, model=None):
     The structure variable is the numeric system which represents the index of the hierarchy section in the table of contents. For example, the first section has structure index 1, the first subsection has structure index 1.1, the second subsection has structure index 1.2, etc.
 
     For the title, you need to extract the original title from the text, only fix the space inconsistency.
+
+    Prefer the MOST SPECIFIC visible heading on a page.
+    If both a generic subsection label and a more specific heading exist on the same page, keep the more specific one.
+    Examples of generic subsection labels to avoid when a more specific title exists:
+    - Overview
+    - Background
+    - Design Goals
+    - Implementation Details
+    - Testing Notes
+    - Detailed Findings
+    - Summary
+    - Conclusion
+
+    Prefer specific table / figure / appendix titles such as:
+    - Table R.1. ...
+    - Figure 2. ...
+    - Appendix A ...
+
+    Do not include page headers, page footers, or document title lines such as:
+    - <document name> | Page X / Y
 
     The provided text contains tags like <physical_index_X> and <physical_index_X> to indicate the start and end of page X. 
 
@@ -566,10 +1019,11 @@ def generate_toc_init(part, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = prompt + '\nGiven text\n:' + part
-    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+    response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True, debug_label="generate_toc_init")
 
     if finish_reason == 'finished':
-         return extract_json(response)
+         parsed = extract_json(response, debug_label="generate_toc_init")
+         return _post_process_generated_toc_items(parsed)
     else:
         raise Exception(f'finish reason: {finish_reason}')
 
@@ -587,6 +1041,21 @@ def process_no_toc(page_list, start_index=1, model=None, logger=None):
     for group_text in group_texts[1:]:
         toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)    
         toc_with_page_number.extend(toc_with_page_number_additional)
+    toc_with_page_number = _post_process_generated_toc_items(toc_with_page_number)
+    title_counts = {}
+    for item in toc_with_page_number:
+        title = str(item.get("title") or "").strip()
+        if title:
+            title_counts[title] = title_counts.get(title, 0) + 1
+    repeated_titles = {title: count for title, count in title_counts.items() if count > 1}
+    _stage_log(
+        "process_no_toc",
+        "generated_toc_summary",
+        logger=logger,
+        entries=len(toc_with_page_number),
+        repeated_titles=len(repeated_titles),
+        sample_titles=" | ".join(list(title_counts.keys())[:5]),
+    )
     logger.info(f'generate_toc: {toc_with_page_number}')
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
@@ -597,7 +1066,8 @@ def process_no_toc(page_list, start_index=1, model=None, logger=None):
 def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_index=1, model=None, logger=None):
     page_contents=[]
     token_lengths=[]
-    toc_content = toc_transformer(toc_content, model)
+    stage_start = time.perf_counter()
+    toc_content = toc_transformer(toc_content, model, logger=logger)
     logger.info(f'toc_transformer: {toc_content}')
     for page_index in range(start_index, start_index+len(page_list)):
         page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
@@ -614,13 +1084,21 @@ def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_in
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
     logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
+    _stage_log(
+        "process_toc_no_page_numbers",
+        "completed",
+        logger=logger,
+        entries=len(toc_with_page_number),
+        duration_ms=round((time.perf_counter() - stage_start) * 1000, 2),
+    )
 
     return toc_with_page_number
 
 
 
 def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=None, model=None, logger=None):
-    toc_with_page_number = toc_transformer(toc_content, model)
+    stage_start = time.perf_counter()
+    toc_with_page_number = toc_transformer(toc_content, model, logger=logger)
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     toc_no_page_number = remove_page_number(copy.deepcopy(toc_with_page_number))
@@ -647,6 +1125,14 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
 
     toc_with_page_number = process_none_page_numbers(toc_with_page_number, page_list, model=model)
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
+    _stage_log(
+        "process_toc_with_page_numbers",
+        "completed",
+        logger=logger,
+        toc_entries=len(toc_with_page_number),
+        matching_pairs=len(matching_pairs),
+        duration_ms=round((time.perf_counter() - stage_start) * 1000, 2),
+    )
 
     return toc_with_page_number
 
@@ -697,13 +1183,16 @@ def check_toc(page_list, opt=None):
     toc_page_list = find_toc_pages(start_page_index=0, page_list=page_list, opt=opt)
     if len(toc_page_list) == 0:
         print('no toc found')
+        _stage_log("check_toc", "completed", toc_pages=0, mode="no_toc")
         return {'toc_content': None, 'toc_page_list': [], 'page_index_given_in_toc': 'no'}
     else:
         print('toc found')
+        _stage_log("check_toc", "toc_pages_detected", toc_pages=len(toc_page_list), first_page=toc_page_list[0], last_page=toc_page_list[-1])
         toc_json = toc_extractor(page_list, toc_page_list, opt.model)
 
         if toc_json['page_index_given_in_toc'] == 'yes':
             print('index found')
+            _stage_log("check_toc", "completed", toc_pages=len(toc_page_list), mode="toc_with_page_numbers")
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'yes'}
         else:
             current_start_index = toc_page_list[-1] + 1
@@ -724,11 +1213,13 @@ def check_toc(page_list, opt=None):
                 additional_toc_json = toc_extractor(page_list, additional_toc_pages, opt.model)
                 if additional_toc_json['page_index_given_in_toc'] == 'yes':
                     print('index found')
+                    _stage_log("check_toc", "completed", toc_pages=len(additional_toc_pages), mode="additional_toc_with_page_numbers")
                     return {'toc_content': additional_toc_json['toc_content'], 'toc_page_list': additional_toc_pages, 'page_index_given_in_toc': 'yes'}
 
                 else:
                     current_start_index = additional_toc_pages[-1] + 1
             print('index not found')
+            _stage_log("check_toc", "completed", toc_pages=len(toc_page_list), mode="toc_without_page_numbers")
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'no'}
 
 
@@ -751,8 +1242,8 @@ async def single_toc_item_index_fixer(section_title, content, model=None):
     Directly return the final JSON structure. Do not output anything else."""
 
     prompt = toc_extractor_prompt + '\nSection Title:\n' + str(section_title) + '\nDocument pages:\n' + content
-    response = await llm_acompletion(model=model, prompt=prompt)
-    json_content = extract_json(response)    
+    response = await llm_acompletion(model=model, prompt=prompt, debug_label="single_toc_item_index_fixer")
+    json_content = extract_json(response, debug_label="single_toc_item_index_fixer")    
     return convert_physical_index_to_int(json_content['physical_index'])
 
 
@@ -840,6 +1331,7 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
         for item in incorrect_results
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    flush_litellm_logging_worker_sync(timeout_seconds=2.0)
     for item, result in zip(incorrect_results, results):
         if isinstance(result, Exception):
             print(f"Processing item {item} generated an exception: {result}")
@@ -899,6 +1391,7 @@ async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorr
 ################### verify toc #########################################################
 async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     print('start verify_toc')
+    start_time = time.perf_counter()
     # Find the last non-None physical_index
     last_physical_index = None
     for item in reversed(list_result):
@@ -935,7 +1428,8 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
         for item in indexed_sample_list
     ]
     results = await asyncio.gather(*tasks)
-    
+    flush_litellm_logging_worker_sync(timeout_seconds=2.0)
+
     # Process results
     correct_count = 0
     incorrect_results = []
@@ -949,6 +1443,14 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     checked_count = len(results)
     accuracy = correct_count / checked_count if checked_count > 0 else 0
     print(f"accuracy: {accuracy*100:.2f}%")
+    _stage_log(
+        "verify_toc",
+        "completed",
+        checked_count=checked_count,
+        incorrect_count=len(incorrect_results),
+        accuracy=round(accuracy, 4),
+        duration_ms=round((time.perf_counter() - start_time) * 1000, 2),
+    )
     return accuracy, incorrect_results
 
 
@@ -998,11 +1500,122 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
         
  
 async def process_large_node_recursively(node, page_list, opt=None, logger=None):
+    return await process_large_node_recursively_with_depth(node, page_list, opt=opt, logger=logger, current_depth=1)
+
+
+def _node_should_attempt_recursive_split(node, node_page_list, opt, current_depth):
+    if str(getattr(opt, "recursive_split_enabled", "yes")).strip().lower() != "yes":
+        return False
+    if current_depth >= getattr(opt, "recursive_split_max_depth", 3):
+        return False
+    if node.get("nodes"):
+        return False
+    page_span = node["end_index"] - node["start_index"] + 1
+    token_num = sum(page[1] for page in node_page_list)
+    return (
+        page_span >= getattr(opt, "recursive_split_min_pages", 4)
+        or token_num >= getattr(opt, "recursive_split_min_tokens", 2000)
+    )
+
+
+def _build_children_from_heading_candidates(parent_node, candidates):
+    if not candidates:
+        return []
+
+    children = []
+    for index, candidate in enumerate(candidates):
+        start_index = candidate["physical_index"]
+        if index < len(candidates) - 1:
+            next_start = candidates[index + 1]["physical_index"]
+            end_index = next_start - 1 if next_start > start_index else next_start
+        else:
+            end_index = parent_node["end_index"]
+
+        if end_index < start_index:
+            continue
+
+        children.append(
+            {
+                "title": candidate["title"],
+                "start_index": start_index,
+                "end_index": end_index,
+            }
+        )
+
+    if len(children) >= 2:
+        start_pages = [child["start_index"] for child in children]
+        if start_pages == sorted(start_pages) and len(start_pages) == len(set(start_pages)):
+            return children
+
+    if len(children) == 1:
+        child = children[0]
+        if child["title"].strip().lower() != parent_node["title"].strip().lower():
+            return children
+
+    return []
+
+
+async def process_large_node_recursively_with_depth(node, page_list, opt=None, logger=None, current_depth=1):
     node_page_list = page_list[node['start_index']-1:node['end_index']]
     token_num = sum([page[1] for page in node_page_list])
-    
-    if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
+    _stage_log(
+        "recursive_split",
+        "inspect_node",
+        logger=logger,
+        title=node.get("title"),
+        depth=current_depth,
+        start_index=node.get("start_index"),
+        end_index=node.get("end_index"),
+        token_num=token_num,
+    )
+
+    if _node_should_attempt_recursive_split(node, node_page_list, opt, current_depth):
+        heading_candidates = extract_heading_candidates_from_page_list(
+            node_page_list,
+            node["start_index"],
+            parent_title=node.get("title"),
+            heading_patterns=getattr(opt, "recursive_split_heading_patterns", None),
+        )
+        heuristic_children = _build_children_from_heading_candidates(node, heading_candidates)
+        if heuristic_children:
+            node["nodes"] = heuristic_children
+            _stage_log(
+                "recursive_split",
+                "heuristic_children_created",
+                logger=logger,
+                title=node.get("title"),
+                depth=current_depth,
+                child_count=len(heuristic_children),
+            )
+            if logger:
+                logger.info(
+                    {
+                        "mode": "heuristic_recursive_split",
+                        "title": node.get("title"),
+                        "start_index": node.get("start_index"),
+                        "end_index": node.get("end_index"),
+                        "children": [{"title": child["title"], "start_index": child["start_index"], "end_index": child["end_index"]} for child in heuristic_children],
+                    }
+                )
+        else:
+            _stage_log(
+                "recursive_split",
+                "heuristic_split_skipped",
+                logger=logger,
+                title=node.get("title"),
+                depth=current_depth,
+                candidate_count=len(heading_candidates),
+            )
+
+    if not node.get("nodes") and node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
         print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
+        _stage_log(
+            "recursive_split",
+            "llm_fallback_started",
+            logger=logger,
+            title=node.get("title"),
+            depth=current_depth,
+        )
 
         node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
         node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
@@ -1016,10 +1629,18 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
         else:
             node['nodes'] = post_processing(valid_node_toc_items, node['end_index'])
             node['end_index'] = valid_node_toc_items[0]['start_index'] if valid_node_toc_items else node['end_index']
-        
+        _stage_log(
+            "recursive_split",
+            "llm_fallback_completed",
+            logger=logger,
+            title=node.get("title"),
+            depth=current_depth,
+            child_count=len(node.get("nodes", []) or []),
+        )
+    
     if 'nodes' in node and node['nodes']:
         tasks = [
-            process_large_node_recursively(child_node, page_list, opt, logger=logger)
+            process_large_node_recursively_with_depth(child_node, page_list, opt, logger=logger, current_depth=current_depth + 1)
             for child_node in node['nodes']
         ]
         await asyncio.gather(*tasks)
@@ -1055,7 +1676,7 @@ async def tree_parser(page_list, opt, doc=None, logger=None):
     
     toc_tree = post_processing(valid_toc_items, len(page_list))
     tasks = [
-        process_large_node_recursively(node, page_list, opt, logger=logger)
+        process_large_node_recursively_with_depth(node, page_list, opt, logger=logger, current_depth=1)
         for node in toc_tree
     ]
     await asyncio.gather(*tasks)
@@ -1075,35 +1696,39 @@ def build_pdf_tree_from_opt(doc, opt=None):
 
     print('Parsing PDF...')
     page_list = get_page_tokens(doc, model=opt.model)
+    _stage_log("llm_limits", "configured", logger=logger, **get_llm_runtime_limits())
 
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})
 
     async def build_tree():
-        structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
-        if opt.if_add_node_id == 'yes':
-            write_node_id(structure)    
-        if opt.if_add_node_text == 'yes':
-            add_node_text(structure, page_list)
-        if opt.if_add_node_summary == 'yes':
-            if opt.if_add_node_text == 'no':
+        try:
+            structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
+            if opt.if_add_node_id == 'yes':
+                write_node_id(structure)    
+            if opt.if_add_node_text == 'yes':
                 add_node_text(structure, page_list)
-            await generate_summaries_for_structure(structure, model=opt.model)
-            if opt.if_add_node_text == 'no':
-                remove_structure_text(structure)
-            if opt.if_add_doc_description == 'yes':
-                # Create a clean structure without unnecessary fields for description generation
-                clean_structure = create_clean_structure_for_description(structure)
-                doc_description = generate_doc_description(clean_structure, model=opt.model)
-                return {
-                    'doc_name': get_pdf_name(doc),
-                    'doc_description': doc_description,
-                    'structure': structure,
-                }
-        return {
-            'doc_name': get_pdf_name(doc),
-            'structure': structure,
-        }
+            if opt.if_add_node_summary == 'yes':
+                if opt.if_add_node_text == 'no':
+                    add_node_text(structure, page_list)
+                await generate_summaries_for_structure(structure, model=opt.model)
+                if opt.if_add_node_text == 'no':
+                    remove_structure_text(structure)
+                if opt.if_add_doc_description == 'yes':
+                    # Create a clean structure without unnecessary fields for description generation
+                    clean_structure = create_clean_structure_for_description(structure)
+                    doc_description = generate_doc_description(clean_structure, model=opt.model)
+                    return {
+                        'doc_name': get_pdf_name(doc),
+                        'doc_description': doc_description,
+                        'structure': structure,
+                    }
+            return {
+                'doc_name': get_pdf_name(doc),
+                'structure': structure,
+            }
+        finally:
+            await flush_litellm_logging_worker(stop_worker=False)
 
     return asyncio.run(build_tree())
 

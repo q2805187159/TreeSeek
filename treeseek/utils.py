@@ -4,6 +4,12 @@ from datetime import datetime
 import time
 import json
 import importlib
+import re
+import contextvars
+import random
+import threading
+import weakref
+from collections import deque
 import PyPDF2
 import copy
 import asyncio
@@ -13,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import logging
 import yaml
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace as config
 
@@ -57,8 +64,23 @@ _copy_env_if_missing("OPENAI_API_KEY", "API_KEY")
 _copy_env_if_missing("OPENAI_API_KEY", "CHATGPT_API_KEY")
 _copy_env_if_missing("OPENAI_API_BASE", "API_URL")
 _copy_env_if_missing("OPENAI_BASE_URL", "API_URL")
+os.environ.setdefault("LOGGING_WORKER_MAX_TIME_PER_COROUTINE", "120")
+os.environ.setdefault("MAX_TIME_TO_CLEAR_QUEUE", "15")
+os.environ.setdefault("TREESEEK_LLM_MAX_CONCURRENCY", "2")
+os.environ.setdefault("TREESEEK_LLM_MAX_RPM", "12")
+os.environ.setdefault("TREESEEK_LLM_RETRY_BASE_DELAY", "1.0")
+os.environ.setdefault("TREESEEK_LLM_RETRY_MAX_DELAY", "8.0")
+os.environ.setdefault("TREESEEK_DEBUG_LOGS", "no")
 
 _LITELLM = None
+_LOGGING_FLUSH_TASK = None
+_LLM_DEBUG_CONTEXT = contextvars.ContextVar("rag_llm_debug_context", default=None)
+_SYNC_LLM_SEMAPHORE = threading.BoundedSemaphore(
+    max(1, int(os.getenv("TREESEEK_LLM_MAX_CONCURRENCY", "2")))
+)
+_ASYNC_LLM_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_LLM_RATE_LIMIT_LOCK = threading.Lock()
+_LLM_REQUEST_TIMESTAMPS = deque()
 
 
 def normalize_model_name(model):
@@ -91,7 +113,200 @@ def _get_litellm():
     if _LITELLM is None:
         _LITELLM = importlib.import_module("litellm")
         _LITELLM.drop_params = True
+        _LITELLM.turn_off_message_logging = True
+        if hasattr(_LITELLM, "standard_logging_payload_excluded_fields"):
+            _LITELLM.standard_logging_payload_excluded_fields = [
+                "messages",
+                "input",
+                "prompt",
+            ]
+        try:
+            logging_worker_module = importlib.import_module("litellm.litellm_core_utils.logging_worker")
+            worker = getattr(logging_worker_module, "GLOBAL_LOGGING_WORKER", None)
+            if worker is not None:
+                configured_timeout = float(os.getenv("LOGGING_WORKER_MAX_TIME_PER_COROUTINE", "120"))
+                worker.timeout = max(float(getattr(worker, "timeout", 0.0) or 0.0), configured_timeout)
+        except Exception as exc:
+            logging.warning(f"_get_litellm: unable to tune logging worker timeout: {exc}")
     return _LITELLM
+
+
+@contextmanager
+def llm_debug_context(label: str, **details):
+    payload = {"label": label, **details}
+    token = _LLM_DEBUG_CONTEXT.set(payload)
+    try:
+        yield
+    finally:
+        _LLM_DEBUG_CONTEXT.reset(token)
+
+
+def _resolve_debug_label(debug_label=None):
+    if debug_label:
+        return str(debug_label)
+    ctx = _LLM_DEBUG_CONTEXT.get()
+    if isinstance(ctx, dict):
+        return str(ctx.get("label") or "llm")
+    if ctx:
+        return str(ctx)
+    return "llm"
+
+
+def is_debug_logs_enabled() -> bool:
+    return str(os.getenv("TREESEEK_DEBUG_LOGS", "no")).strip().lower() == "yes"
+
+
+def _debug_detail_text(debug_label=None):
+    ctx = _LLM_DEBUG_CONTEXT.get()
+    if isinstance(ctx, dict):
+        details = {k: v for k, v in ctx.items() if k != "label" and v is not None}
+        if details:
+            return ", ".join(f"{key}={details[key]}" for key in sorted(details))
+    return ""
+
+
+def _get_async_llm_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _ASYNC_LLM_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(max(1, int(os.getenv("TREESEEK_LLM_MAX_CONCURRENCY", "2"))))
+        _ASYNC_LLM_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+def _compute_retry_delay(exc: Exception, attempt: int) -> float:
+    retry_after = getattr(exc, "retry_after", None)
+    if retry_after is not None:
+        try:
+            return max(float(retry_after), 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    message = str(exc)
+    match = re.search(r"after\s+(\d+(?:\.\d+)?)\s+seconds?", message, re.IGNORECASE)
+    if match:
+        try:
+            return max(float(match.group(1)), 0.0)
+        except (TypeError, ValueError):
+            pass
+
+    base_delay = float(os.getenv("TREESEEK_LLM_RETRY_BASE_DELAY", "1.0"))
+    max_delay = float(os.getenv("TREESEEK_LLM_RETRY_MAX_DELAY", "8.0"))
+    delay = min(base_delay * (2 ** max(attempt - 1, 0)), max_delay)
+    jitter = random.uniform(0.0, min(0.25, delay * 0.2))
+    return delay + jitter
+
+
+def get_llm_runtime_limits() -> dict[str, float | int]:
+    return {
+        "max_concurrency": max(1, int(os.getenv("TREESEEK_LLM_MAX_CONCURRENCY", "2"))),
+        "max_rpm": max(1, int(os.getenv("TREESEEK_LLM_MAX_RPM", "12"))),
+        "retry_base_delay": float(os.getenv("TREESEEK_LLM_RETRY_BASE_DELAY", "1.0")),
+        "retry_max_delay": float(os.getenv("TREESEEK_LLM_RETRY_MAX_DELAY", "8.0")),
+        "logging_worker_timeout": float(os.getenv("LOGGING_WORKER_MAX_TIME_PER_COROUTINE", "120")),
+    }
+
+
+def _reserve_llm_request_slot_sync() -> float:
+    max_rpm = max(1, int(os.getenv("TREESEEK_LLM_MAX_RPM", "12")))
+    total_wait = 0.0
+    while True:
+        with _LLM_RATE_LIMIT_LOCK:
+            now = time.monotonic()
+            while _LLM_REQUEST_TIMESTAMPS and (now - _LLM_REQUEST_TIMESTAMPS[0]) >= 60.0:
+                _LLM_REQUEST_TIMESTAMPS.popleft()
+
+            if len(_LLM_REQUEST_TIMESTAMPS) < max_rpm:
+                _LLM_REQUEST_TIMESTAMPS.append(now)
+                return total_wait
+
+            wait_seconds = max(0.05, 60.0 - (now - _LLM_REQUEST_TIMESTAMPS[0]) + 0.01)
+            total_wait += wait_seconds
+        time.sleep(wait_seconds)
+
+
+async def _reserve_llm_request_slot_async() -> float:
+    max_rpm = max(1, int(os.getenv("TREESEEK_LLM_MAX_RPM", "12")))
+    total_wait = 0.0
+    while True:
+        with _LLM_RATE_LIMIT_LOCK:
+            now = time.monotonic()
+            while _LLM_REQUEST_TIMESTAMPS and (now - _LLM_REQUEST_TIMESTAMPS[0]) >= 60.0:
+                _LLM_REQUEST_TIMESTAMPS.popleft()
+
+            if len(_LLM_REQUEST_TIMESTAMPS) < max_rpm:
+                _LLM_REQUEST_TIMESTAMPS.append(now)
+                return total_wait
+
+            wait_seconds = max(0.05, 60.0 - (now - _LLM_REQUEST_TIMESTAMPS[0]) + 0.01)
+            total_wait += wait_seconds
+        await asyncio.sleep(wait_seconds)
+
+
+async def flush_litellm_logging_worker(timeout_seconds: float = 5.0, stop_worker: bool = False):
+    """
+    Drain LiteLLM's background logging worker before the event loop is closed.
+
+    LiteLLM queues async success logging on a global worker. In short-lived
+    CLI processes using asyncio.run(...), that worker can still be active when
+    the loop is torn down, producing noisy TimeoutError / CancelledError logs.
+    We explicitly flush and stop it at our top-level async boundaries so those
+    callbacks finish while the loop is still alive.
+    """
+    if _LITELLM is None:
+        return
+
+    try:
+        logging_worker_module = importlib.import_module("litellm.litellm_core_utils.logging_worker")
+        worker = getattr(logging_worker_module, "GLOBAL_LOGGING_WORKER", None)
+        if worker is None:
+            return
+
+        try:
+            await asyncio.wait_for(worker.flush(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logging.warning("flush_litellm_logging_worker: flush timed out, attempting clear_queue")
+            try:
+                await asyncio.wait_for(worker.clear_queue(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                logging.warning("flush_litellm_logging_worker: clear_queue timed out")
+            except Exception as exc:
+                logging.warning(f"flush_litellm_logging_worker: clear_queue failed: {exc}")
+        except Exception as exc:
+            logging.warning(f"flush_litellm_logging_worker: flush failed: {exc}")
+
+        if stop_worker:
+            try:
+                await asyncio.wait_for(worker.stop(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                logging.warning("flush_litellm_logging_worker: stop timed out")
+            except Exception as exc:
+                logging.warning(f"flush_litellm_logging_worker: stop failed: {exc}")
+    except Exception as exc:
+        logging.warning(f"flush_litellm_logging_worker: unable to access logging worker: {exc}")
+
+
+def flush_litellm_logging_worker_sync(timeout_seconds: float = 1.0):
+    """
+    Schedule a best-effort background flush on the active event loop so async
+    LiteLLM logging does not build up too much work between large gather() calls.
+    """
+    global _LOGGING_FLUSH_TASK
+
+    if _LITELLM is None:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    if _LOGGING_FLUSH_TASK is not None and not _LOGGING_FLUSH_TASK.done():
+        return
+
+    _LOGGING_FLUSH_TASK = loop.create_task(
+        flush_litellm_logging_worker(timeout_seconds=timeout_seconds, stop_worker=False)
+    )
 
 def count_tokens(text, model=None):
     if not text:
@@ -100,18 +315,26 @@ def count_tokens(text, model=None):
     return litellm.token_counter(model=normalize_model_name(model), text=text)
 
 
-def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
+def llm_completion(model, prompt, chat_history=None, return_finish_reason=False, debug_label=None):
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     litellm = _get_litellm()
     normalized_model = normalize_model_name(model)
+    label = _resolve_debug_label(debug_label)
+    detail_text = _debug_detail_text(debug_label)
     for i in range(max_retries):
         try:
-            response = litellm.completion(
-                model=normalized_model,
-                messages=messages,
-                temperature=0,
-            )
+            with _SYNC_LLM_SEMAPHORE:
+                wait_seconds = _reserve_llm_request_slot_sync()
+                if wait_seconds > 0:
+                    logging.info(
+                        f"[llm_completion:{label}] request slot acquired after wait={round(wait_seconds, 2)}s"
+                    )
+                response = litellm.completion(
+                    model=normalized_model,
+                    messages=messages,
+                    temperature=0,
+                )
             content = response.choices[0].message.content
             if return_finish_reason:
                 finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
@@ -119,37 +342,60 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             return content
         except Exception as e:
             print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+            delay = _compute_retry_delay(e, i + 1)
+            logging.error(
+                f"[llm_completion:{label}] attempt={i+1}/{max_retries} model={normalized_model} "
+                f"prompt_chars={len(prompt)} detail=({detail_text}) retry_delay={round(delay, 2)} error={e}"
+            )
             if i < max_retries - 1:
-                time.sleep(1)
+                time.sleep(delay)
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
+                prompt_preview = prompt[:400].replace("\n", "\\n")
+                logging.error(
+                    f"[llm_completion:{label}] max retries reached, prompt_preview={prompt_preview}"
+                )
                 if return_finish_reason:
                     return "", "error"
                 return ""
 
 
 
-async def llm_acompletion(model, prompt):
+async def llm_acompletion(model, prompt, debug_label=None):
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
     litellm = _get_litellm()
     normalized_model = normalize_model_name(model)
+    label = _resolve_debug_label(debug_label)
+    detail_text = _debug_detail_text(debug_label)
+    semaphore = _get_async_llm_semaphore()
     for i in range(max_retries):
         try:
-            response = await litellm.acompletion(
-                model=normalized_model,
-                messages=messages,
-                temperature=0,
-            )
+            async with semaphore:
+                wait_seconds = await _reserve_llm_request_slot_async()
+                if wait_seconds > 0:
+                    logging.info(
+                        f"[llm_acompletion:{label}] request slot acquired after wait={round(wait_seconds, 2)}s"
+                    )
+                response = await litellm.acompletion(
+                    model=normalized_model,
+                    messages=messages,
+                    temperature=0,
+                )
             return response.choices[0].message.content
         except Exception as e:
             print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+            delay = _compute_retry_delay(e, i + 1)
+            logging.error(
+                f"[llm_acompletion:{label}] attempt={i+1}/{max_retries} model={normalized_model} "
+                f"prompt_chars={len(prompt)} detail=({detail_text}) retry_delay={round(delay, 2)} error={e}"
+            )
             if i < max_retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(delay)
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
+                prompt_preview = prompt[:400].replace("\n", "\\n")
+                logging.error(
+                    f"[llm_acompletion:{label}] max retries reached, prompt_preview={prompt_preview}"
+                )
                 return ""
             
             
@@ -167,7 +413,7 @@ def get_json_content(response):
     return json_content
          
 
-def extract_json(content):
+def extract_json(content, debug_label=None):
     try:
         # First, try to extract JSON enclosed within ```json and ```
         start_idx = content.find("```json")
@@ -187,17 +433,22 @@ def extract_json(content):
         # Attempt to parse and return the JSON object
         return json.loads(json_content)
     except json.JSONDecodeError as e:
-        logging.error(f"Failed to extract JSON: {e}")
+        label = _resolve_debug_label(debug_label)
+        preview = str(content)[:400].replace("\n", "\\n")
+        logging.error(f"[extract_json:{label}] Failed to extract JSON: {e}; content_preview={preview}")
         # Try to clean up the content further if initial parsing fails
         try:
             # Remove any trailing commas before closing brackets/braces
             json_content = json_content.replace(',]', ']').replace(',}', '}')
             return json.loads(json_content)
         except:
-            logging.error("Failed to parse JSON even after cleanup")
+            cleanup_preview = str(json_content)[:400].replace("\n", "\\n")
+            logging.error(f"[extract_json:{label}] Failed to parse JSON even after cleanup; cleaned_preview={cleanup_preview}")
             return {}
     except Exception as e:
-        logging.error(f"Unexpected error while extracting JSON: {e}")
+        label = _resolve_debug_label(debug_label)
+        preview = str(content)[:400].replace("\n", "\\n")
+        logging.error(f"[extract_json:{label}] Unexpected error while extracting JSON: {e}; content_preview={preview}")
         return {}
 
 def write_node_id(data, node_id=0):
@@ -339,6 +590,108 @@ def sanitize_filename(filename, replacement='-'):
     # Null can't be represented in strings, so we only handle '/'.
     return filename.replace('/', replacement)
 
+
+def _normalize_heading_line(line: str | None) -> str:
+    if not line:
+        return ""
+    cleaned = re.sub(r"\s+", " ", str(line)).strip()
+    cleaned = cleaned.lstrip("-*• \t")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _looks_like_numbered_heading(line: str) -> bool:
+    return bool(re.match(r"^\d+(?:\.\d+){0,3}\s+[A-Za-z]", line))
+
+
+def _looks_like_all_caps_heading(line: str) -> bool:
+    letters = [char for char in line if char.isalpha()]
+    if not letters:
+        return False
+    return all(char.isupper() for char in letters)
+
+
+def _looks_like_title_case_heading(line: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", line)
+    if len(words) < 2 or len(words) > 12:
+        return False
+    titleish = sum(1 for word in words if word[:1].isupper() or word[:1].isdigit())
+    return titleish / len(words) >= 0.6
+
+
+def line_looks_like_heading(line: str, heading_patterns=None, min_length: int = 4, max_length: int = 120) -> bool:
+    candidate = _normalize_heading_line(line)
+    if not candidate:
+        return False
+    if len(candidate) < min_length or len(candidate) > max_length:
+        return False
+    if candidate[-1] in ".;:?!":
+        return False
+    if len(re.findall(r"[A-Za-z]", candidate)) < 2:
+        return False
+
+    patterns = heading_patterns or []
+    if any(re.match(pattern, candidate) for pattern in patterns):
+        return True
+    if _looks_like_numbered_heading(candidate):
+        return True
+    if _looks_like_all_caps_heading(candidate):
+        return True
+    if _looks_like_title_case_heading(candidate):
+        return True
+    return False
+
+
+def extract_heading_candidates_from_page_list(
+    page_list,
+    start_index: int,
+    *,
+    parent_title: str | None = None,
+    heading_patterns=None,
+    min_length: int = 4,
+    max_length: int = 120,
+):
+    parent_normalized = _normalize_heading_line(parent_title).lower()
+    candidates = []
+    seen_same_page = set()
+
+    for offset, page in enumerate(page_list):
+        page_text = page[0] if isinstance(page, tuple) else page
+        page_number = start_index + offset
+        for raw_line in str(page_text or "").splitlines():
+            candidate = _normalize_heading_line(raw_line)
+            if not candidate:
+                continue
+            if candidate.lower() == parent_normalized:
+                continue
+            if not line_looks_like_heading(
+                candidate,
+                heading_patterns=heading_patterns,
+                min_length=min_length,
+                max_length=max_length,
+            ):
+                continue
+
+            dedupe_key = (page_number, candidate.lower())
+            if dedupe_key in seen_same_page:
+                continue
+
+            if candidates:
+                previous = candidates[-1]
+                if previous["normalized_title"] == candidate.lower() and previous["physical_index"] + 1 == page_number:
+                    continue
+
+            seen_same_page.add(dedupe_key)
+            candidates.append(
+                {
+                    "title": candidate,
+                    "physical_index": page_number,
+                    "normalized_title": candidate.lower(),
+                }
+            )
+
+    return candidates
+
 def get_pdf_name(pdf_path):
     # Extract PDF name
     if isinstance(pdf_path, str):
@@ -358,7 +711,6 @@ class JsonLogger:
             
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filename = f"{pdf_name}_{current_time}.json"
-        os.makedirs("./logs", exist_ok=True)
         # Initialize empty list to store all messages
         self.log_data = []
 
@@ -367,11 +719,6 @@ class JsonLogger:
             self.log_data.append(message)
         else:
             self.log_data.append({'message': message})
-        # Add new message to the log data
-        
-        # Write entire log data to file
-        with open(self._filepath(), "w") as f:
-            json.dump(self.log_data, f, indent=2)
 
     def info(self, message, **kwargs):
         self.log("INFO", message, **kwargs)

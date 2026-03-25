@@ -1,4 +1,4 @@
-from rag.indexing import postings
+from treeseek.indexing import postings
 
 
 def test_sorted_posting_list_set_operations():
