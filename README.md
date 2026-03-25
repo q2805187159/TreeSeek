@@ -59,6 +59,7 @@ TreeSeek 试图解决的正是这些问题。
 | --- | --- |
 | PDF 结构树解析 | 从 PDF 中提取章节树、页码区间、可选摘要 |
 | Markdown 结构树解析 | 基于标题层级生成结构树 |
+| Word 结构树解析 | 支持 `.docx` / `.docm`，基于 Word Heading 样式构建章节树 |
 | 本地查询索引 | 在结构树上构建可复用索引，支持 build once, query many times |
 | 混合检索 | 倒排索引 + BM25-lite + phrase/proximity + diversity |
 | 结果片段返回 | 输出 `snippet`、`highlight_terms`、`snippet_field` |
@@ -172,7 +173,13 @@ python run_treeseek.py --pdf_path /path/to/document.pdf
 python run_treeseek.py --md_path /path/to/document.md --if-add-node-summary no
 ```
 
-### 3. 建索引并立即查询
+### 3. 解析 Word 文档
+
+```bash
+python run_treeseek.py --docx_path /path/to/document.docx --if-add-node-summary no
+```
+
+### 4. 建索引并立即查询
 
 ```bash
 python run_treeseek.py \
@@ -183,7 +190,7 @@ python run_treeseek.py \
   --top-k 5
 ```
 
-### 4. 建一次索引，后续持续查询
+### 5. 建一次索引，后续持续查询
 
 第一次构建索引：
 
@@ -203,7 +210,7 @@ python run_treeseek.py \
   --top-k 5
 ```
 
-### 5. 开启 Explain 模式
+### 6. 开启 Explain 模式
 
 ```bash
 python run_treeseek.py \
@@ -213,7 +220,7 @@ python run_treeseek.py \
   --debug-explain yes
 ```
 
-### 6. 运行 benchmark
+### 7. 运行 benchmark
 
 ```bash
 python scripts/benchmark_query_index.py \
@@ -324,7 +331,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
 ## 文档
 
 - [Architecture](docs/architecture.md)
-- [Enhancement Roadmap](docs/treeseek_enhancement_roadmap.md)
+- [Enhancement Roadmap](docs/rag_enhancement_roadmap.md)
 
 ---
 

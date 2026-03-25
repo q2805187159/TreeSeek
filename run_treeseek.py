@@ -15,6 +15,7 @@ from treeseek.markdown_tree import (
     extract_node_text_content,
     extract_nodes_from_markdown,
 )
+from treeseek.word_tree import build_word_tree, enrich_structure_with_docx_text
 from treeseek.utils import ConfigLoader, add_node_text, get_page_tokens
 
 
@@ -63,6 +64,12 @@ def enrich_markdown_structure_with_text(result, md_path):
     return enriched
 
 
+def enrich_word_structure_with_text(result, docx_path):
+    enriched = copy.deepcopy(result)
+    enrich_structure_with_docx_text(enriched["structure"], docx_path)
+    return enriched
+
+
 def build_indexable_result(result, args, opt):
     include_text = is_yes(args.include_text or opt.index_include_text)
     if not include_text or has_structure_text(result.get("structure", [])):
@@ -70,6 +77,8 @@ def build_indexable_result(result, args, opt):
 
     if args.pdf_path:
         return enrich_pdf_structure_with_text(result, args.pdf_path, model=opt.model), include_text
+    if args.docx_path:
+        return enrich_word_structure_with_text(result, args.docx_path), include_text
     return enrich_markdown_structure_with_text(result, args.md_path), include_text
 
 
@@ -129,6 +138,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process PDF or Markdown document and generate structure')
     parser.add_argument('--pdf_path', type=str, help='Path to the PDF file')
     parser.add_argument('--md_path', type=str, help='Path to the Markdown file')
+    parser.add_argument('--docx_path', '--word_path', dest='docx_path', type=str, help='Path to the Word (.docx/.docm) file')
     parser.add_argument('--index-path', type=str, default=None,
                       help='Path to an existing query index for query-only mode')
 
@@ -177,16 +187,17 @@ if __name__ == "__main__":
                       help='Token threshold for generating summaries (markdown only)')
     args = parser.parse_args()
     
-    if args.pdf_path and args.md_path:
-        raise ValueError("Only one of --pdf_path or --md_path can be specified")
+    selected_sources = [bool(args.pdf_path), bool(args.md_path), bool(args.docx_path)]
+    if sum(selected_sources) > 1:
+        raise ValueError("Only one of --pdf_path, --md_path, or --docx_path can be specified")
 
-    if not args.pdf_path and not args.md_path and not args.index_path:
-        raise ValueError("Either --pdf_path, --md_path, or --index-path must be specified")
+    if not args.pdf_path and not args.md_path and not args.docx_path and not args.index_path:
+        raise ValueError("Either --pdf_path, --md_path, --docx_path, or --index-path must be specified")
 
     if args.index_path and not os.path.isfile(args.index_path):
         raise ValueError(f"Query index file not found: {args.index_path}")
 
-    if args.index_path and not args.pdf_path and not args.md_path:
+    if args.index_path and not args.pdf_path and not args.md_path and not args.docx_path:
         if not args.query:
             raise ValueError("--query must be specified when using --index-path")
 
@@ -279,6 +290,111 @@ if __name__ == "__main__":
         query_index_output_dir = args.index_output_dir
         os.makedirs(query_index_output_dir, exist_ok=True)
         query_index_path = os.path.join(query_index_output_dir, f'{pdf_name}_query_index.pkl.gz')
+        include_text = is_yes(args.include_text or opt.index_include_text)
+
+        if args.query and os.path.isfile(query_index_path):
+            query_index = load_query_index(query_index_path)
+            if query_index.include_text != include_text:
+                query_index = None
+
+        if query_index is None and (is_yes(args.build_query_index) or args.query):
+            indexable_result, include_text = build_indexable_result(result, args, opt)
+            query_index = build_query_index(
+                indexable_result,
+                include_text=include_text,
+                postings_backend=opt.index_postings_backend,
+                field_weights=build_field_weights(opt),
+                bonuses=build_bonuses(opt),
+                snippet_max_chars=opt.snippet_max_chars,
+                snippet_context_chars=opt.snippet_context_chars,
+                debug_explain_default=is_yes(args.debug_explain or opt.debug_explain_default),
+                bm25_k1=opt.bm25_k1,
+                bm25_b=opt.bm25_b,
+                proximity_window=opt.proximity_window,
+                diversity_penalty=opt.diversity_penalty,
+            )
+
+        if query_index is not None and is_yes(args.build_query_index):
+            save_query_index(query_index, query_index_path)
+            print(f'Query index saved to: {query_index_path}')
+
+        if args.query and query_index is not None:
+            execute_query(
+                query_index,
+                args,
+                opt,
+                query_index_path if os.path.isfile(query_index_path) else None,
+            )
+    elif args.docx_path:
+        if not args.docx_path.lower().endswith(('.docx', '.docm')):
+            raise ValueError("Word file must have .docx or .docm extension")
+        if not os.path.isfile(args.docx_path):
+            raise ValueError(f"Word file not found: {args.docx_path}")
+
+        print('Processing Word file...')
+        import asyncio
+        from treeseek.utils import ConfigLoader
+        config_loader = ConfigLoader()
+
+        user_opt = {
+            'model': args.model,
+            'if_add_node_summary': args.if_add_node_summary,
+            'if_add_doc_description': args.if_add_doc_description,
+            'if_add_node_text': args.if_add_node_text,
+            'if_add_node_id': args.if_add_node_id,
+            'index_backend': 'inverted',
+            'index_postings_backend': None,
+            'index_include_text': args.include_text,
+            'query_default_top_k': args.top_k,
+            'query_expand_ancestors': None,
+            'query_leaf_only': args.leaf_only,
+            'weight_title': None,
+            'weight_path': None,
+            'weight_summary': None,
+            'weight_prefix_summary': None,
+            'weight_text': None,
+            'bonus_exact_title': None,
+            'bonus_phrase': None,
+            'bonus_leaf': None,
+            'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
+        }
+        opt = config_loader.load({k: v for k, v in user_opt.items() if v is not None})
+
+        result = asyncio.run(
+            build_word_tree(
+                docx_path=args.docx_path,
+                if_thinning=args.if_thinning.lower() == 'yes',
+                min_token_threshold=args.thinning_threshold,
+                if_add_node_summary=opt.if_add_node_summary,
+                summary_token_threshold=args.summary_token_threshold,
+                model=opt.model,
+                if_add_doc_description=opt.if_add_doc_description,
+                if_add_node_text=opt.if_add_node_text,
+                if_add_node_id=opt.if_add_node_id,
+            )
+        )
+
+        print('Parsing done, saving to file...')
+        docx_name = os.path.splitext(os.path.basename(args.docx_path))[0]
+        output_dir = './results'
+        output_file = f'{output_dir}/{docx_name}_structure.json'
+        os.makedirs(output_dir, exist_ok=True)
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+        print(f'Tree structure saved to: {output_file}')
+
+        query_index = None
+        query_index_output_dir = args.index_output_dir
+        os.makedirs(query_index_output_dir, exist_ok=True)
+        query_index_path = os.path.join(query_index_output_dir, f'{docx_name}_query_index.pkl.gz')
         include_text = is_yes(args.include_text or opt.index_include_text)
 
         if args.query and os.path.isfile(query_index_path):

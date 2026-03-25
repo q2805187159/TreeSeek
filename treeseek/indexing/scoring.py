@@ -85,7 +85,15 @@ def score_candidate(
             if debug_explain:
                 field_scores[field_name] = round(current_field_score, 6)
 
-    if normalized_query and normalized_fields.get("title") == normalized_query:
+    exact_title_targets = []
+    if normalized_query:
+        exact_title_targets.append(normalized_query)
+    for phrase in phrases:
+        if phrase:
+            exact_title_targets.append(phrase)
+    exact_title_targets = list(dict.fromkeys(exact_title_targets))
+
+    if normalized_fields.get("title") in exact_title_targets:
         exact_bonus = float(index.bonuses.get("exact_title", 0.0))
         score += exact_bonus
         matched_fields.add("title")

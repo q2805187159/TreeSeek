@@ -186,3 +186,52 @@ def test_debug_explain_mode_includes_explain_fields(local_tmp_path):
     assert '"field_scores"' in completed.stdout
     assert '"bonuses_applied"' in completed.stdout
     assert '"phrase_matches"' in completed.stdout
+
+
+def test_docx_cli_builds_query_index_and_runs_query(local_tmp_path):
+    from docx import Document
+
+    repo_root = Path(__file__).resolve().parents[1]
+    docx_path = local_tmp_path / "sample.docx"
+    index_dir = local_tmp_path / "index"
+    results_dir = local_tmp_path / "results"
+
+    document = Document()
+    document.add_heading("Operations Guide", level=1)
+    document.add_paragraph("Operational overview.")
+    document.add_heading("Compliance Workflow", level=2)
+    document.add_paragraph("Compliance review workflow and control testing.")
+    document.save(docx_path)
+
+    command = [
+        sys.executable,
+        str(repo_root / "run_treeseek.py"),
+        "--docx_path",
+        str(docx_path),
+        "--if-add-node-summary",
+        "no",
+        "--build-query-index",
+        "yes",
+        "--query",
+        "compliance workflow",
+        "--top-k",
+        "2",
+        "--include-text",
+        "yes",
+        "--index-output-dir",
+        str(index_dir),
+    ]
+
+    completed = subprocess.run(
+        command,
+        cwd=local_tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        check=True,
+    )
+
+    assert (results_dir / "sample_structure.json").exists()
+    assert (index_dir / "sample_query_index.pkl.gz").exists()
+    assert '"query": "compliance workflow"' in completed.stdout
+    assert "Compliance Workflow" in completed.stdout

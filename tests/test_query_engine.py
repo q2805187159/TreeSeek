@@ -65,3 +65,13 @@ def test_debug_explain_mode_returns_explain_fields(synthetic_text_doc):
     assert result.field_scores
     assert result.bonuses_applied
     assert "text" in result.field_scores
+
+
+def test_quoted_phrase_query_can_trigger_exact_title_bonus(synthetic_text_doc):
+    index = build_query_index(synthetic_text_doc, include_text=True)
+    results = search_index(index, '"Direct-to-Consumer"', top_k=2, debug_explain=True)
+
+    assert results
+    result = results[0]
+    assert result.node_id == "1001"
+    assert any(item["name"] == "exact_title" for item in result.bonuses_applied)
