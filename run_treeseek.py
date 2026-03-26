@@ -5,11 +5,15 @@ import copy
 from treeseek import (
     build_pdf_tree_from_opt,
     build_query_index,
+    build_corpus_from_directory,
     load_query_index,
+    load_corpus_index,
     rerank_query_results,
     save_query_index,
     search_index,
+    search_corpus,
 )
+from treeseek.corpus.corpus_models import CorpusQueryRequest
 from treeseek.markdown_tree import (
     build_markdown_tree,
     extract_node_text_content,
@@ -111,6 +115,15 @@ def emit_query_results(doc_name, query, index_path, results):
     }, indent=2, ensure_ascii=False))
 
 
+def emit_corpus_query_results(corpus_name, query, corpus_index_path, results):
+    print(json.dumps({
+        "corpus_name": corpus_name,
+        "query": query,
+        "corpus_index_path": corpus_index_path,
+        "results": [item.to_dict() for item in results],
+    }, indent=2, ensure_ascii=False))
+
+
 def execute_query(index, args, opt, index_path):
     top_k = args.top_k or opt.query_default_top_k
     leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
@@ -133,6 +146,75 @@ def execute_query(index, args, opt, index_path):
         )
     emit_query_results(index.doc_id, args.query, index_path, results)
 
+
+def execute_corpus_query(corpus_index, args, opt, corpus_index_path):
+    top_k = args.top_k or opt.query_default_top_k
+    leaf_only = is_yes(args.leaf_only or opt.query_leaf_only)
+    debug_explain = is_yes(args.debug_explain or opt.debug_explain_default)
+    tags = [tag.strip() for tag in (args.tags or "").split(",") if tag.strip()]
+    request = CorpusQueryRequest(
+        query=args.query,
+        top_k=top_k,
+        doc_id=args.doc_id,
+        doc_type=args.doc_type,
+        tags=tags,
+        source=args.source,
+        created_at_from=args.created_at_from,
+        created_at_to=args.created_at_to,
+        leaf_only=leaf_only,
+        rerank_with_llm=is_yes(args.rerank_with_llm),
+        debug_explain=debug_explain,
+    )
+    results = search_corpus(corpus_index, request, model=opt.model)
+    emit_corpus_query_results(corpus_index.corpus_name, args.query, corpus_index_path, results)
+
+
+def run_interactive_loop(run_query, *, initial_state: dict | None = None):
+    state = {
+        "top_k": 10,
+        "leaf_only": "no",
+        "rerank_with_llm": "no",
+        "debug_explain": "no",
+        "doc_id": None,
+    }
+    if initial_state:
+        state.update(initial_state)
+
+    print("Interactive mode started. Use /exit to quit.")
+    while True:
+        try:
+            query = input("treeseek> ").strip()
+        except EOFError:
+            print()
+            break
+
+        if not query:
+            continue
+        if query == "/exit":
+            break
+        if query.startswith("/topk "):
+            state["top_k"] = int(query.split(" ", 1)[1].strip())
+            print(f"top_k={state['top_k']}")
+            continue
+        if query.startswith("/leaf "):
+            state["leaf_only"] = query.split(" ", 1)[1].strip().lower()
+            print(f"leaf_only={state['leaf_only']}")
+            continue
+        if query.startswith("/rerank "):
+            state["rerank_with_llm"] = query.split(" ", 1)[1].strip().lower()
+            print(f"rerank_with_llm={state['rerank_with_llm']}")
+            continue
+        if query.startswith("/debug "):
+            state["debug_explain"] = query.split(" ", 1)[1].strip().lower()
+            print(f"debug_explain={state['debug_explain']}")
+            continue
+        if query.startswith("/doc "):
+            state["doc_id"] = query.split(" ", 1)[1].strip()
+            print(f"doc_id={state['doc_id']}")
+            continue
+
+        run_query(query, state)
+
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Process PDF or Markdown document and generate structure')
@@ -141,6 +223,14 @@ if __name__ == "__main__":
     parser.add_argument('--docx_path', '--word_path', dest='docx_path', type=str, help='Path to the Word (.docx/.docm) file')
     parser.add_argument('--index-path', type=str, default=None,
                       help='Path to an existing query index for query-only mode')
+    parser.add_argument('--corpus-input-dir', type=str, default=None,
+                      help='Path to a directory of documents for corpus build mode')
+    parser.add_argument('--corpus-index-path', type=str, default=None,
+                      help='Path to an existing corpus index for corpus query mode')
+    parser.add_argument('--corpus-name', type=str, default='default',
+                      help='Corpus name used for corpus build output')
+    parser.add_argument('--corpus-exclude-glob', action='append', default=None,
+                      help='Glob pattern to exclude files from corpus build; can be repeated')
 
     parser.add_argument('--model', type=str, default=None, help='Model to use (overrides config.yaml)')
 
@@ -177,6 +267,20 @@ if __name__ == "__main__":
                       help='Number of top results to send to the LLM reranker')
     parser.add_argument('--debug-explain', type=str, default='no',
                       help='Whether to include detailed explain fields in query results')
+    parser.add_argument('--interactive', type=str, default='no',
+                      help='Whether to enter interactive query mode')
+    parser.add_argument('--doc-id', type=str, default=None,
+                      help='Document id filter for corpus query mode')
+    parser.add_argument('--doc-type', type=str, default=None,
+                      help='Document type filter for corpus query mode')
+    parser.add_argument('--tags', type=str, default=None,
+                      help='Comma-separated tags filter for corpus query mode')
+    parser.add_argument('--source', type=str, default=None,
+                      help='Source filter for corpus query mode')
+    parser.add_argument('--created-at-from', type=str, default=None,
+                      help='Inclusive lower bound ISO timestamp for corpus query mode')
+    parser.add_argument('--created-at-to', type=str, default=None,
+                      help='Inclusive upper bound ISO timestamp for corpus query mode')
                       
     # Markdown specific arguments
     parser.add_argument('--if-thinning', type=str, default='no',
@@ -187,18 +291,26 @@ if __name__ == "__main__":
                       help='Token threshold for generating summaries (markdown only)')
     args = parser.parse_args()
     
-    selected_sources = [bool(args.pdf_path), bool(args.md_path), bool(args.docx_path)]
+    selected_sources = [
+        bool(args.pdf_path),
+        bool(args.md_path),
+        bool(args.docx_path),
+        bool(args.corpus_input_dir),
+        bool(args.corpus_index_path),
+    ]
     if sum(selected_sources) > 1:
-        raise ValueError("Only one of --pdf_path, --md_path, or --docx_path can be specified")
+        raise ValueError("Only one source mode can be specified at a time")
 
-    if not args.pdf_path and not args.md_path and not args.docx_path and not args.index_path:
-        raise ValueError("Either --pdf_path, --md_path, --docx_path, or --index-path must be specified")
+    if not args.pdf_path and not args.md_path and not args.docx_path and not args.index_path and not args.corpus_input_dir and not args.corpus_index_path:
+        raise ValueError("Either --pdf_path, --md_path, --docx_path, --index-path, --corpus-input-dir, or --corpus-index-path must be specified")
 
     if args.index_path and not os.path.isfile(args.index_path):
         raise ValueError(f"Query index file not found: {args.index_path}")
+    if args.corpus_index_path and not os.path.isfile(args.corpus_index_path):
+        raise ValueError(f"Corpus index file not found: {args.corpus_index_path}")
 
     if args.index_path and not args.pdf_path and not args.md_path and not args.docx_path:
-        if not args.query:
+        if not args.query and not is_yes(args.interactive):
             raise ValueError("--query must be specified when using --index-path")
 
         user_opt = {
@@ -227,7 +339,105 @@ if __name__ == "__main__":
         }
         opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
         query_index = load_query_index(args.index_path)
-        execute_query(query_index, args, opt, args.index_path)
+        if is_yes(args.interactive):
+            def _run(query, state):
+                args.query = query
+                args.top_k = state["top_k"]
+                args.leaf_only = state["leaf_only"]
+                args.rerank_with_llm = state["rerank_with_llm"]
+                args.debug_explain = state["debug_explain"]
+                execute_query(query_index, args, opt, args.index_path)
+            run_interactive_loop(_run)
+        else:
+            execute_query(query_index, args, opt, args.index_path)
+        raise SystemExit(0)
+
+    if args.corpus_index_path and not args.pdf_path and not args.md_path and not args.docx_path and not args.corpus_input_dir:
+        if not args.query and not is_yes(args.interactive):
+            raise ValueError("--query must be specified when using --corpus-index-path")
+
+        user_opt = {
+            'model': args.model,
+            'query_default_top_k': args.top_k,
+            'query_expand_ancestors': None,
+            'query_leaf_only': args.leaf_only,
+            'index_include_text': args.include_text,
+            'index_backend': 'inverted',
+            'index_postings_backend': None,
+            'weight_title': None,
+            'weight_path': None,
+            'weight_summary': None,
+            'weight_prefix_summary': None,
+            'weight_text': None,
+            'bonus_exact_title': None,
+            'bonus_phrase': None,
+            'bonus_leaf': None,
+            'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
+        }
+        opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
+        corpus_index = load_corpus_index(args.corpus_index_path)
+        if is_yes(args.interactive):
+            def _run(query, state):
+                args.query = query
+                args.top_k = state["top_k"]
+                args.leaf_only = state["leaf_only"]
+                args.rerank_with_llm = state["rerank_with_llm"]
+                args.debug_explain = state["debug_explain"]
+                args.doc_id = state.get("doc_id")
+                execute_corpus_query(corpus_index, args, opt, args.corpus_index_path)
+            run_interactive_loop(_run)
+        else:
+            execute_corpus_query(corpus_index, args, opt, args.corpus_index_path)
+        raise SystemExit(0)
+
+    if args.corpus_input_dir:
+        user_opt = {
+            'model': args.model,
+            'if_add_node_summary': args.if_add_node_summary,
+            'if_add_doc_description': args.if_add_doc_description,
+            'if_add_node_text': args.if_add_node_text,
+            'if_add_node_id': args.if_add_node_id,
+            'index_backend': 'inverted',
+            'index_postings_backend': None,
+            'index_include_text': args.include_text,
+            'query_default_top_k': args.top_k,
+            'query_expand_ancestors': None,
+            'query_leaf_only': args.leaf_only,
+            'weight_title': None,
+            'weight_path': None,
+            'weight_summary': None,
+            'weight_prefix_summary': None,
+            'weight_text': None,
+            'bonus_exact_title': None,
+            'bonus_phrase': None,
+            'bonus_leaf': None,
+            'bonus_all_terms_hit': None,
+            'bonus_proximity': None,
+            'bm25_k1': None,
+            'bm25_b': None,
+            'proximity_window': None,
+            'diversity_penalty': None,
+            'debug_explain_default': args.debug_explain,
+        }
+        corpus_index, corpus_index_path = build_corpus_from_directory(
+            args.corpus_input_dir,
+            corpus_name=args.corpus_name,
+            output_dir="./results/corpus",
+            user_opt={k: v for k, v in user_opt.items() if v is not None},
+            exclude_globs=args.corpus_exclude_glob or [],
+        )
+        print(json.dumps({
+            "corpus_name": corpus_index.corpus_name,
+            "corpus_index_path": corpus_index_path,
+            "document_count": len(corpus_index.documents),
+            "exclude_globs": corpus_index.exclude_globs,
+        }, indent=2, ensure_ascii=False))
         raise SystemExit(0)
     
     if args.pdf_path:

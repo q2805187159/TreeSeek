@@ -13,6 +13,10 @@ __all__ = [
     "rerank_query_results",
     "save_query_index",
     "search_index",
+    "build_corpus_from_directory",
+    "load_corpus_index",
+    "save_corpus_index",
+    "search_corpus",
 ]
 
 _MODULE_BY_EXPORT = {
@@ -26,6 +30,10 @@ _MODULE_BY_EXPORT = {
     "save_query_index": "treeseek.indexing.storage",
     "search_index": "treeseek.indexing.query_engine",
     "rerank_query_results": "treeseek.indexing.llm_rerank",
+    "build_corpus_from_directory": "treeseek.corpus.corpus_builder",
+    "load_corpus_index": "treeseek.corpus.corpus_storage",
+    "save_corpus_index": "treeseek.corpus.corpus_storage",
+    "search_corpus": "treeseek.corpus.corpus_query",
 }
 
 

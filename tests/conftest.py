@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def synthetic_text_doc():
 
 @pytest.fixture
 def local_tmp_path():
-    base_dir = REPO_ROOT / ".tmp_pytest"
+    base_dir = Path(tempfile.gettempdir()) / "treeseek_pytest"
     base_dir.mkdir(exist_ok=True)
     path = base_dir / f"run_{uuid.uuid4().hex}"
     path.mkdir(parents=True, exist_ok=True)
